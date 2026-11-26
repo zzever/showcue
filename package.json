@@ -1,7 +1,7 @@
 {
   "name": "showcue",
   "productName": "ShowCue",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "ShowCue — sistema de cues para shows en vivo (audio, video, grupos, fades y control de salida)",
   "main": "./out/main/index.js",
   "author": "zzever",
@@ -50,8 +50,18 @@
         "publisherName": "zzever"
       },
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
