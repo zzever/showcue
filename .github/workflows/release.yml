@@ -1,12 +1,11 @@
-name: Release firmado
+name: Release
 
-# Compila los ejecutables de Windows y los firma con SignPath Foundation.
+# Compila los ejecutables de Windows y, si hay cuenta de SignPath, los firma.
 # Requisitos en el repositorio (Settings → Secrets and variables → Actions):
 #   secret  SIGNPATH_API_TOKEN   token de API de SignPath (permiso de envío)
 #   var     SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG,
 #           SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_ARTIFACT_CONFIGURATION_SLUG
-# Los tres últimos tienen valores por defecto abajo; sobrescríbelos sólo si tu
-# proyecto de SignPath usa otros nombres.
+# Mientras no exista SIGNPATH_API_TOKEN, la Release se publica sin firma.
 
 on:
   push:
@@ -19,9 +18,11 @@ permissions:
   actions: read
 
 jobs:
-  build-and-sign:
+  build:
     name: Compilar y firmar (Windows x64)
     runs-on: windows-latest
+    env:
+      SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     steps:
       - name: Descargar el código
         uses: actions/checkout@v4
@@ -57,9 +58,10 @@ jobs:
 
       - name: Enviar la solicitud de firma a SignPath
         id: signpath
+        if: env.SIGNPATH_TOKEN != ''
         uses: signpath/github-action-submit-signing-request@v3
         with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          api-token: ${{ env.SIGNPATH_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'showcue' }}
           signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
@@ -71,6 +73,7 @@ jobs:
           output-artifact-directory: release/firmado
 
       - name: Usar los ejecutables firmados y verificar la firma
+        if: env.SIGNPATH_TOKEN != ''
         shell: pwsh
         run: |
           $firmados = @(Get-ChildItem release/firmado -Recurse -Filter *.exe)
@@ -95,10 +98,19 @@ jobs:
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
           } | Set-Content release/SHA256SUMS.txt -Encoding utf8
 
-      - name: Guardar los ejecutables firmados
+      - name: Calcular sumas SHA-256 (sin firma)
+        if: env.SIGNPATH_TOKEN == ''
+        shell: pwsh
+        run: |
+          Get-ChildItem release -Filter *.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content release/SHA256SUMS.txt -Encoding utf8
+          Write-Host "Sin SIGNPATH_API_TOKEN: la Release se publica sin firma Authenticode."
+
+      - name: Guardar los ejecutables
         uses: actions/upload-artifact@v4
         with:
-          name: showcue-firmado
+          name: showcue-windows
           path: |
             release/ShowCue-*-instalador.exe
             release/ShowCue-*-portable.exe
@@ -114,5 +126,9 @@ jobs:
             release/ShowCue-*-instalador.exe
             release/ShowCue-*-portable.exe
             release/SHA256SUMS.txt
+          body: |
+            ${{ env.SIGNPATH_TOKEN == '' && '⚠️ Ejecutables **sin firmar**: la cuenta de SignPath Foundation está pendiente de aprobación.' || '✅ Ejecutables firmados con **SignPath Foundation**.' }}
+
+            Comprueba la integridad con el `SHA256SUMS.txt` adjunto. Instrucciones en [CODE_SIGNING.md](https://github.com/zzever/showcue/blob/main/CODE_SIGNING.md).
           generate_release_notes: true
           fail_on_unmatched_files: true
