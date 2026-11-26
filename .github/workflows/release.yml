@@ -1,0 +1,118 @@
+name: Release firmado
+
+# Compila los ejecutables de Windows y los firma con SignPath Foundation.
+# Requisitos en el repositorio (Settings → Secrets and variables → Actions):
+#   secret  SIGNPATH_API_TOKEN   token de API de SignPath (permiso de envío)
+#   var     SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG,
+#           SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_ARTIFACT_CONFIGURATION_SLUG
+# Los tres últimos tienen valores por defecto abajo; sobrescríbelos sólo si tu
+# proyecto de SignPath usa otros nombres.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build-and-sign:
+    name: Compilar y firmar (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Comprobar tipos
+        run: npm run typecheck
+
+      - name: Compilar instalador y portable (sin firmar)
+        run: npm run dist
+        env:
+          # electron-builder no debe buscar certificados locales en el runner.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Publicar los ejecutables sin firmar como artefacto del build
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: showcue-sin-firmar
+          path: |
+            release/ShowCue-*-instalador.exe
+            release/ShowCue-*-portable.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Enviar la solicitud de firma a SignPath
+        id: signpath
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'showcue' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG || 'showcue-ejecutables' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          # La aprobación manual del mantenedor puede tardar: damos una hora.
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: release/firmado
+
+      - name: Usar los ejecutables firmados y verificar la firma
+        shell: pwsh
+        run: |
+          $firmados = @(Get-ChildItem release/firmado -Recurse -Filter *.exe)
+          if ($firmados.Count -ne 2) {
+            throw "Se esperaban 2 ejecutables firmados y hay $($firmados.Count)."
+          }
+          foreach ($f in $firmados) {
+            Copy-Item $f.FullName -Destination release -Force
+          }
+          # Los .blockmap se generaron para los binarios sin firmar: ya no sirven.
+          Get-ChildItem release -Filter *.blockmap -ErrorAction SilentlyContinue | Remove-Item -Force
+
+          $fallos = 0
+          Get-ChildItem release -Filter *.exe | ForEach-Object {
+            $sig = Get-AuthenticodeSignature $_.FullName
+            Write-Host ("{0}: {1} — {2}" -f $_.Name, $sig.Status, $sig.SignerCertificate.Subject)
+            if ($sig.Status -ne 'Valid') { $fallos++ }
+          }
+          if ($fallos -gt 0) { throw "Hay ejecutables sin firma válida." }
+
+          Get-ChildItem release -Filter *.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content release/SHA256SUMS.txt -Encoding utf8
+
+      - name: Guardar los ejecutables firmados
+        uses: actions/upload-artifact@v4
+        with:
+          name: showcue-firmado
+          path: |
+            release/ShowCue-*-instalador.exe
+            release/ShowCue-*-portable.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Crear la Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/ShowCue-*-instalador.exe
+            release/ShowCue-*-portable.exe
+            release/SHA256SUMS.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true

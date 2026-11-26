@@ -1,0 +1,9 @@
+node_modules/
+out/
+release/
+dist/
+*.tsbuildinfo
+.env
+.freebuff/
+.env.*
+!.env.example

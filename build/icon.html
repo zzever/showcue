@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+      svg { display: block; width: 100vw; height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <svg viewBox="0 0 1024 1024" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#1c232a" />
+          <stop offset="1" stop-color="#0b0f13" />
+        </linearGradient>
+        <linearGradient id="lime" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#c8ff5e" />
+          <stop offset="1" stop-color="#9fdd33" />
+        </linearGradient>
+      </defs>
+      <rect width="1024" height="1024" rx="208" fill="url(#bg)" />
+      <circle
+        cx="512" cy="512" r="330"
+        fill="none" stroke="url(#lime)" stroke-width="58"
+      />
+      <path
+        d="M 412 356 L 700 512 L 412 668 Z"
+        fill="url(#lime)" stroke="url(#lime)" stroke-width="58"
+        stroke-linejoin="round" stroke-linecap="round"
+      />
+    </svg>
+  </body>
+</html>
