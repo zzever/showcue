@@ -5,5 +5,8 @@ dist/
 *.tsbuildinfo
 .env
 .freebuff/
+.tmp-edge-profile*/
+tmp-*
+logs.zip
 .env.*
 !.env.example

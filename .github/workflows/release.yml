@@ -40,7 +40,11 @@ jobs:
         run: npm run typecheck
 
       - name: Compilar instalador y portable (sin firmar)
-        run: npm run dist
+        # --publish never: en una etiqueta, electron-builder intentaría publicar
+        # por su cuenta y fallaría sin GH_TOKEN. La Release la crea el último paso.
+        run: |
+          npm run build
+          npx electron-builder --publish never
         env:
           # electron-builder no debe buscar certificados locales en el runner.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"

@@ -45,8 +45,10 @@
     ],
     "win": {
       "icon": "build/icon.ico",
-      "publisherName": "zzever",
       "legalTrademarks": "zzever",
+      "signtoolOptions": {
+        "publisherName": "zzever"
+      },
       "target": [
         { "target": "nsis", "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
