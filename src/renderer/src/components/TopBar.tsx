@@ -18,6 +18,9 @@ interface Props {
   standby: Cue | undefined
   hotkeysEnabled: boolean
   onToggleHotkeys: () => void
+  onOpenDmx: () => void
+  recording: boolean
+  onToggleRecord: () => void
 }
 
 const SAVE_LABEL: Record<SaveState, string> = {
@@ -32,11 +35,13 @@ const ADD_TYPES: { type: CueType; hint: string }[] = [
   { type: 'audio', hint: 'Reproduce un archivo de audio' },
   { type: 'video', hint: 'Video o imagen en la ventana de salida' },
   { type: 'group', hint: 'Dispara varios cues juntos' },
+  { type: 'random', hint: 'Elige cues al azar (pilas de logos)' },
   { type: 'wait', hint: 'Pausa temporizada' },
   { type: 'fade', hint: 'Cambia el volumen de otros cues' },
   { type: 'stop', hint: 'Detiene otros cues' },
   { type: 'memo', hint: 'Nota para el operador' },
-  { type: 'dmx', hint: 'Envía canales DMX por Art-Net' }
+  { type: 'dmx', hint: 'Envía canales DMX por Art-Net' },
+  { type: 'timeline', hint: 'Dispara cues a su segundo grabado' }
 ]
 
 export default function TopBar({
@@ -52,7 +57,10 @@ export default function TopBar({
   runningCount,
   standby,
   hotkeysEnabled,
-  onToggleHotkeys
+  onToggleHotkeys,
+  onOpenDmx,
+  recording,
+  onToggleRecord
 }: Props): JSX.Element {
   const title = useShowStore((state) => state.title)
   const saveState = useShowStore((state) => state.saveState)
@@ -134,17 +142,36 @@ export default function TopBar({
           Importar
         </button>
 
+        <span className="tool-sep" aria-hidden />
+
         <div className="btn-group">
-          <button className="btn btn-icon" onClick={onNew} title="Nuevo show (Ctrl+N)">
+          <button
+            className="btn btn-icon btn-file"
+            onClick={onNew}
+            title="Nuevo show (Ctrl+N) — pide confirmación si hay cambios"
+          >
             Nuevo
           </button>
-          <button className="btn btn-icon" onClick={onOpen} title="Abrir show (Ctrl+O)">
+          <button className="btn btn-icon btn-file" onClick={onOpen} title="Abrir show (Ctrl+O)">
             Abrir
           </button>
-          <button className="btn btn-icon" onClick={onSave} title="Guardar (Ctrl+S)">
+          <button className="btn btn-icon btn-file" onClick={onSave} title="Guardar (Ctrl+S)">
             Guardar
           </button>
         </div>
+
+        <button className="btn" onClick={onOpenDmx} title="Mesa DMX directa y monitor Art-Net">
+          DMX
+        </button>
+
+        <button
+          className={`btn ${recording ? 'btn-rec' : ''}`}
+          onClick={onToggleRecord}
+          title="Grabar línea de tiempo con los GO"
+        >
+          <span className={`rec-dot ${recording ? 'on' : ''}`} />
+          {recording ? 'Parar' : 'REC'}
+        </button>
 
         <button
           className={`btn ${outputOpen ? 'btn-live' : ''}`}

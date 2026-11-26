@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type {
   AudioCue,
+  AudioEq,
   Cue,
   DisplayInfo,
   FixtureProfile,
@@ -11,7 +12,7 @@ import type {
 import { api } from '../lib/bridge'
 import { comboFromEvent, isReservedCombo } from '../lib/triggers'
 import { useShowStore } from '../lib/store'
-import { listOutputDevices, requestDeviceLabels } from '../lib/audio'
+import { listDevices, listOutputDevices, requestDeviceLabels } from '../lib/audio'
 import {
   cueByIdMap,
   cueDuration,
@@ -22,8 +23,10 @@ import {
   toNumber
 } from '../lib/format'
 import { mediaUrl, probeDuration } from '../lib/media'
-import { cueTypeLabel } from '../lib/cues'
+import { cueTypeLabel, NEUTRAL_FRAME } from '../lib/cues'
+import { addTag, allTags, tagColor } from '../lib/tags'
 import Waveform from './Waveform'
+import CuePreview from './CuePreview'
 
 function Field({
   label,
@@ -153,6 +156,208 @@ function VolumeControl({
         <span className="mono slider-value">{formatPercent(value)}</span>
         <span className="mono slider-db">{formatGainDb(value)}</span>
       </div>
+    </div>
+  )
+}
+
+function EqBand({
+  label,
+  hint,
+  value,
+  onChange
+}: {
+  label: string
+  hint?: string
+  value: number
+  onChange: (value: number) => void
+}): JSX.Element {
+  return (
+    <div className="field">
+      <span className="field-label">{label}</span>
+      <div className="slider-row">
+        <input
+          type="range"
+          className="slider"
+          min={-12}
+          max={12}
+          step={0.5}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+        <span className="mono slider-db">
+          {value > 0 ? '+' : ''}
+          {value.toFixed(1)} dB
+        </span>
+      </div>
+      {hint && <span className="field-hint">{hint}</span>}
+    </div>
+  )
+}
+
+const FLAT_EQ: AudioEq = { low: 0, mid: 0, high: 0, highPass: 0 }
+
+function AudioEqSection({
+  eq,
+  onChange
+}: {
+  eq: AudioEq
+  onChange: (eq: AudioEq) => void
+}): JSX.Element {
+  return (
+    <>
+      <div className="field-row">
+        <EqBand
+          label="Graves"
+          hint="200 Hz"
+          value={eq.low}
+          onChange={(low) => onChange({ ...eq, low })}
+        />
+        <EqBand
+          label="Medios"
+          hint="1 kHz"
+          value={eq.mid}
+          onChange={(mid) => onChange({ ...eq, mid })}
+        />
+      </div>
+      <div className="field-row">
+        <EqBand
+          label="Agudos"
+          hint="4 kHz"
+          value={eq.high}
+          onChange={(high) => onChange({ ...eq, high })}
+        />
+        <Field label="Corte de graves" hint="Filtro paso alto">
+          <select
+            className="input select"
+            value={String(eq.highPass ?? 0)}
+            onChange={(event) => onChange({ ...eq, highPass: Number(event.target.value) })}
+          >
+            <option value="0">Desactivado</option>
+            <option value="60">60 Hz</option>
+            <option value="80">80 Hz</option>
+            <option value="120">120 Hz</option>
+            <option value="200">200 Hz</option>
+          </select>
+        </Field>
+      </div>
+      <button className="btn small ghost" onClick={() => onChange({ ...FLAT_EQ })}>
+        Respuesta plana
+      </button>
+    </>
+  )
+}
+
+function TagEditor({
+  tags,
+  suggestions,
+  onChange
+}: {
+  tags: string[]
+  suggestions: string[]
+  onChange: (tags: string[]) => void
+}): JSX.Element {
+  const [draft, setDraft] = useState('')
+  const commit = (value: string): void => {
+    const next = addTag(tags, value)
+    if (next !== tags) onChange(next)
+    setDraft('')
+  }
+
+  return (
+    <div className="field wide">
+      <span className="field-label">Etiquetas</span>
+      <div className="tag-editor">
+        {tags.map((tag) => (
+          <span
+            key={tag}
+            className="tag-chip"
+            style={{ color: tagColor(tag), borderColor: `${tagColor(tag)}55` }}
+          >
+            {tag}
+            <button
+              type="button"
+              className="tag-remove"
+              title="Quitar etiqueta"
+              onClick={() => onChange(tags.filter((item) => item !== tag))}
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+        <input
+          className="input tag-input"
+          value={draft}
+          list="showcue-tag-suggestions"
+          spellCheck={false}
+          placeholder="Añadir etiqueta…"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ',') {
+              event.preventDefault()
+              commit(draft)
+            } else if (event.key === 'Backspace' && !draft && tags.length > 0) {
+              onChange(tags.slice(0, -1))
+            }
+          }}
+          onBlur={() => commit(draft)}
+        />
+        <datalist id="showcue-tag-suggestions">
+          {suggestions
+            .filter((item) => !tags.includes(item))
+            .map((item) => (
+              <option key={item} value={item} />
+            ))}
+        </datalist>
+      </div>
+    </div>
+  )
+}
+
+function RandomMembersEditor({
+  cue,
+  all,
+  onChange
+}: {
+  cue: Cue & { type: 'random' }
+  all: Cue[]
+  onChange: (members: string[]) => void
+}): JSX.Element {
+  const candidates = all.filter(
+    (candidate) =>
+      candidate.id !== cue.id && candidate.type !== 'group' && candidate.type !== 'random'
+  )
+
+  return (
+    <div className="field wide">
+      <span className="field-label">Cues entre los que elegir</span>
+      {candidates.length === 0 ? (
+        <div className="field-hint">
+          Añade antes los cues que forman la pila (por ejemplo, los logos).
+        </div>
+      ) : (
+        <div className="target-grid">
+          {candidates.map((candidate) => {
+            const active = cue.members.includes(candidate.id)
+            return (
+              <button
+                key={candidate.id}
+                type="button"
+                className={`target-chip ${active ? 'on' : ''}`}
+                onClick={() =>
+                  onChange(
+                    active
+                      ? cue.members.filter((id) => id !== candidate.id)
+                      : [...cue.members, candidate.id]
+                  )
+                }
+              >
+                <span className="target-num mono">{candidate.number}</span>
+                <span className="target-name">{candidate.name}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -340,14 +545,28 @@ export default function Inspector(): JSX.Element {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [displays, setDisplays] = useState<DisplayInfo[]>([])
   const [fixtures, setFixtures] = useState<FixtureProfile[]>([])
+  const [inputs, setInputs] = useState<MediaDeviceInfo[]>([])
+  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([])
+  const patchList = useShowStore((state) => state.patch)
+  const groups = useShowStore((state) => state.settings.speakerGroups ?? [])
 
   const cue = cues.find((candidate) => candidate.id === selectedId)
   const byId = useMemo(() => cueByIdMap(cues), [cues])
+  const tagSuggestions = useMemo(() => allTags(cues), [cues])
+  const listSuggestions = useMemo(
+    () =>
+      [...new Set(cues.map((item) => item.list ?? ''))]
+        .filter((list) => list !== '')
+        .sort((a, b) => a.localeCompare(b, 'es')),
+    [cues]
+  )
 
   useEffect(() => {
     void listOutputDevices().then(setDevices)
     void api.listDisplays().then(setDisplays)
     void api.listFixtures().then(setFixtures)
+    void listDevices('audioinput').then(setInputs)
+    void listDevices('videoinput').then(setCameras)
   }, [])
 
   const importFixtures = async (): Promise<void> => {
@@ -470,13 +689,40 @@ export default function Inspector(): JSX.Element {
         {cue.type === 'audio' && (
           <>
             <section className="insp-section">
-              <h3>Archivo</h3>
-              <FileBox
-                path={cue.fileName || cue.filePath}
-                onChoose={() => void chooseFile(cue)}
-                onClear={() => update(cue.id, { filePath: '', fileName: '', mediaDuration: 0 })}
-              />
-              {cue.filePath && (
+              <h3>Origen</h3>
+              <Field label="Tipo" hint="Archivo del disco o entrada en directo">
+                <select
+                  className="input select"
+                  value={cue.sourceKind ?? 'file'}
+                  onChange={(event) => update(cue.id, { sourceKind: event.target.value })}
+                >
+                  <option value="file">Archivo</option>
+                  <option value="microphone">Micrófono en directo</option>
+                </select>
+              </Field>
+              {(cue.sourceKind ?? 'file') === 'microphone' ? (
+                <Field label="Entrada de audio" hint="Suena hasta que se pare el cue">
+                  <select
+                    className="input select"
+                    value={cue.inputDeviceId ?? ''}
+                    onChange={(event) => update(cue.id, { inputDeviceId: event.target.value })}
+                  >
+                    <option value="">Micrófono predeterminado</option>
+                    {inputs.map((device, index) => (
+                      <option key={device.deviceId || index} value={device.deviceId}>
+                        {device.label || `Entrada ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              ) : (
+                <FileBox
+                  path={cue.fileName || cue.filePath}
+                  onChoose={() => void chooseFile(cue)}
+                  onClear={() => update(cue.id, { filePath: '', fileName: '', mediaDuration: 0 })}
+                />
+              )}
+              {(cue.sourceKind ?? 'file') !== 'microphone' && cue.filePath && (
                 <Waveform
                   path={cue.filePath}
                   start={cue.startTime}
@@ -552,6 +798,11 @@ export default function Inspector(): JSX.Element {
             </section>
 
             <section className="insp-section">
+              <h3>Ajustes de audio</h3>
+              <AudioEqSection eq={cue.eq ?? FLAT_EQ} onChange={(eq) => update(cue.id, { eq })} />
+            </section>
+
+            <section className="insp-section">
               <h3>Reproducción</h3>
               <div className="toggle-row">
                 <Toggle
@@ -588,21 +839,69 @@ export default function Inspector(): JSX.Element {
                   </button>
                 </div>
               </Field>
+              <Field label="Grupo de altavoces" hint="Destino y nivel del equipo de sonido">
+                <select
+                  className="input select"
+                  value={cue.groupId ?? ''}
+                  onChange={(event) => update(cue.id, { groupId: event.target.value })}
+                >
+                  <option value="">Sin grupo (salida del cue)</option>
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {group.name} · {Math.round(group.level * 100)}%
+                    </option>
+                  ))}
+                </select>
+              </Field>
             </section>
           </>
         )}
 
         {cue.type === 'video' && (
           <>
+            <CuePreview cue={cue} outputLabel={outputSummary(cue, displays) || 'Salida principal'} />
+
             <section className="insp-section">
               <h3>Media</h3>
-              <FileBox
-                path={cue.fileName || cue.filePath}
-                onChoose={() => void chooseFile(cue)}
-                onClear={() =>
-                  update(cue.id, { filePath: '', fileName: '', mediaDuration: 0, mediaKind: 'video' })
-                }
-              />
+              <Field label="Origen" hint="Archivo del disco o cámara en directo">
+                <select
+                  className="input select"
+                  value={cue.sourceKind ?? 'file'}
+                  onChange={(event) => update(cue.id, { sourceKind: event.target.value })}
+                >
+                  <option value="file">Archivo o imagen</option>
+                  <option value="camera">Cámara en directo</option>
+                </select>
+              </Field>
+              {(cue.sourceKind ?? 'file') === 'camera' ? (
+                <Field label="Cámara" hint="Se captura en la ventana de salida">
+                  <select
+                    className="input select"
+                    value={cue.cameraDeviceId ?? ''}
+                    onChange={(event) => update(cue.id, { cameraDeviceId: event.target.value })}
+                  >
+                    <option value="">Cámara predeterminada</option>
+                    {cameras.map((device, index) => (
+                      <option key={device.deviceId || index} value={device.deviceId}>
+                        {device.label || `Cámara ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              ) : (
+                <FileBox
+                  path={cue.fileName || cue.filePath}
+                  onChoose={() => void chooseFile(cue)}
+                  onClear={() =>
+                    update(cue.id, {
+                      filePath: '',
+                      fileName: '',
+                      mediaDuration: 0,
+                      mediaKind: 'video'
+                    })
+                  }
+                />
+              )}
               <div className="field-hint">
                 Se muestra en la ventana de salida. Ábrela con el botón «Salida».
               </div>
@@ -662,23 +961,98 @@ export default function Inspector(): JSX.Element {
                   <span className="mono slider-value">{formatPercent(cue.opacity)}</span>
                 </div>
               </Field>
-              <div className="field-row">
-                <Field label="Ajuste">
-                  <select
-                    className="input select"
-                    value={cue.fit}
-                    onChange={(event) => update(cue.id, { fit: event.target.value })}
-                  >
-                    <option value="contain">Completo (contain)</option>
-                    <option value="cover">Rellenar (cover)</option>
-                  </select>
-                </Field>
-                <Field label="Bucle">
-                  <Toggle
-                    checked={cue.loop}
-                    onChange={(loop) => update(cue.id, { loop })}
-                    label={cue.loop ? 'Sí' : 'No'}
+              <div className="toggle-row">
+                <Toggle
+                  checked={cue.loop}
+                  onChange={(loop) => update(cue.id, { loop })}
+                  label="Bucle"
+                />
+              </div>
+            </section>
+
+            <section className="insp-section">
+              <h3>Ajustes de imagen</h3>
+              <Field label="Ajuste" hint="Cómo encaja el medio en la superficie de proyección">
+                <select
+                  className="input select"
+                  value={cue.fit}
+                  onChange={(event) => update(cue.id, { fit: event.target.value })}
+                >
+                  <option value="contain">Completo (contain)</option>
+                  <option value="cover">Rellenar y recortar (cover)</option>
+                  <option value="stretch">Estirar a la superficie</option>
+                  <option value="none">Tamaño original (100 %)</option>
+                </select>
+              </Field>
+              <Field label="Escala" hint="Amplía o reduce sobre ese encuadre">
+                <div className="slider-row">
+                  <input
+                    type="range"
+                    className="slider"
+                    min={10}
+                    max={400}
+                    step={1}
+                    value={Math.round((cue.scale || 1) * 100)}
+                    onChange={(event) =>
+                      update(cue.id, { scale: Number(event.target.value) / 100 })
+                    }
                   />
+                  <span className="mono slider-value">{Math.round((cue.scale || 1) * 100)}%</span>
+                </div>
+              </Field>
+              <div className="field-row">
+                <Field label="Desplazar X" hint="% del ancho">
+                  <input
+                    type="range"
+                    className="slider"
+                    min={-100}
+                    max={100}
+                    step={1}
+                    value={Math.round(cue.offsetX ?? 0)}
+                    onChange={(event) => update(cue.id, { offsetX: Number(event.target.value) })}
+                  />
+                </Field>
+                <Field label="Desplazar Y" hint="% del alto">
+                  <input
+                    type="range"
+                    className="slider"
+                    min={-100}
+                    max={100}
+                    step={1}
+                    value={Math.round(cue.offsetY ?? 0)}
+                    onChange={(event) => update(cue.id, { offsetY: Number(event.target.value) })}
+                  />
+                </Field>
+              </div>
+              <Field label="Rotación" hint="Grados, para proyectores montados en ángulo">
+                <div className="slider-row">
+                  <input
+                    type="range"
+                    className="slider"
+                    min={-180}
+                    max={180}
+                    step={1}
+                    value={Math.round(cue.rotation ?? 0)}
+                    onChange={(event) => update(cue.id, { rotation: Number(event.target.value) })}
+                  />
+                  <span className="mono slider-value">{Math.round(cue.rotation ?? 0)}°</span>
+                </div>
+              </Field>
+              <div className="field-row">
+                <Field label="Rejilla de ajuste" hint="Se superpone en la salida al ejecutar el cue">
+                  <Toggle
+                    checked={cue.testPattern === true}
+                    onChange={(testPattern) => update(cue.id, { testPattern })}
+                    label={cue.testPattern ? 'Sí' : 'No'}
+                  />
+                </Field>
+                <Field label="Encuadre">
+                  <button
+                    className="btn small ghost"
+                    onClick={() => update(cue.id, { ...NEUTRAL_FRAME })}
+                  >
+                    Restablecer
+                  </button>
                 </Field>
               </div>
             </section>
@@ -723,9 +1097,39 @@ export default function Inspector(): JSX.Element {
                   ))}
                 </select>
               </Field>
+              <div className="field-row">
+                <Field label="Rejilla del proyector" hint="Alinea el proyector sin ejecutar el cue">
+                  <div className="device-row">
+                    <button
+                      className="btn small"
+                      onClick={() => {
+                        const displayId = cue.displayId ?? ''
+                        void api.ensureOutput(displayId).then(() =>
+                          api.outputEvent({ type: 'pattern', displayId, on: true })
+                        )
+                      }}
+                    >
+                      Mostrar
+                    </button>
+                    <button
+                      className="btn small ghost"
+                      onClick={() =>
+                        void api.outputEvent({
+                          type: 'pattern',
+                          displayId: cue.displayId ?? '',
+                          on: false
+                        })
+                      }
+                    >
+                      Ocultar
+                    </button>
+                  </div>
+                </Field>
+              </div>
               <div className="field-hint">
                 Cada cue puede ir a una pantalla distinta y sacar su audio por un altavoz
-                distinto. Los grupos reparten sus miembros entre salidas.
+                distinto. Los grupos reparten sus miembros entre salidas. La rejilla también se
+                enciende y apaga con la tecla G en la ventana de salida.
               </div>
             </section>
           </>
@@ -742,6 +1146,122 @@ export default function Inspector(): JSX.Element {
             />
             <div className="field-hint">
               Todos los miembros arrancan con el GO del grupo; el retardo permite escalonarlos.
+            </div>
+          </section>
+        )}
+
+        {cue.type === 'random' && (
+          <section className="insp-section">
+            <h3>Aleatorio</h3>
+            <RandomMembersEditor
+              cue={cue}
+              all={cues}
+              onChange={(members) => update(cue.id, { members })}
+            />
+            <div className="field-row">
+              <Field label="Por GO" hint="Cuántos cues dispara cada vez">
+                <NumberField
+                  value={cue.count ?? 1}
+                  step={1}
+                  min={1}
+                  onChange={(count) => update(cue.id, { count: Math.max(1, Math.round(count)) })}
+                />
+              </Field>
+              <Field label="Sin repetir" hint="Recorre el grupo antes de repetir">
+                <Toggle
+                  checked={cue.avoidRepeat !== false}
+                  onChange={(avoidRepeat) => update(cue.id, { avoidRepeat })}
+                  label={cue.avoidRepeat !== false ? 'Sí' : 'No'}
+                />
+              </Field>
+            </div>
+            <div className="field-hint">
+              Cada GO muestra una pieza al azar de las marcadas. Pensado para pilas de logos: el
+              cue no retiene la lista, así el siguiente GO puede ir enseguida.
+            </div>
+          </section>
+        )}
+
+        {cue.type === 'timeline' && (
+          <section className="insp-section">
+            <h3>Línea de tiempo</h3>
+            <Field label="Duración" hint="0 = hasta el último evento">
+              <NumberField
+                value={cue.duration}
+                onChange={(duration) => update(cue.id, { duration })}
+              />
+            </Field>
+            <div className="field wide">
+              <span className="field-label">Eventos</span>
+              <div className="member-list">
+                {cue.entries.length === 0 && (
+                  <div className="field-hint">
+                    Sin eventos. Graba con REC y pulsa GO en cada cue, o añade uno a mano.
+                  </div>
+                )}
+                {cue.entries.map((entry, index) => {
+                  const child = cues.find((item) => item.id === entry.cueId)
+                  return (
+                    <div className="member-row" key={`${entry.cueId}-${index}`}>
+                      <span className="member-label">
+                        <span className="target-num mono">{child?.number ?? '?'}</span>
+                        {child?.name ?? 'Cue eliminado'}
+                      </span>
+                      <div className="member-delay">
+                        <NumberField
+                          value={entry.at}
+                          onChange={(at) =>
+                            update(cue.id, {
+                              entries: cue.entries.map((item, i) =>
+                                i === index ? { ...item, at } : item
+                              )
+                            })
+                          }
+                        />
+                        <span className="field-hint">s</span>
+                      </div>
+                      <button
+                        className="btn tiny ghost"
+                        title="Quitar evento"
+                        onClick={() =>
+                          update(cue.id, {
+                            entries: cue.entries.filter((_, i) => i !== index)
+                          })
+                        }
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+              <select
+                className="input select"
+                value=""
+                onChange={(event) => {
+                  if (!event.target.value) return
+                  const last = cue.entries.reduce((max, item) => Math.max(max, item.at), 0)
+                  update(cue.id, {
+                    entries: [
+                      ...cue.entries,
+                      { cueId: event.target.value, at: Math.round((last + 1) * 100) / 100 }
+                    ]
+                  })
+                }}
+              >
+                <option value="">Añadir evento…</option>
+                {cues
+                  .filter((item) => item.id !== cue.id && item.type !== 'timeline')
+                  .map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.number} · {item.name} ({cueTypeLabel(item.type)})
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className="field-hint">
+              Reproduce los eventos en sus segundos. Mientras suena, la prioridad GO/línea de
+              tiempo de los ajustes decide si el operador puede saltar cue a mano.
             </div>
           </section>
         )}
@@ -813,6 +1333,44 @@ export default function Inspector(): JSX.Element {
                 <NumberField value={cue.fade} onChange={(fade) => update(cue.id, { fade })} />
               </Field>
             </div>
+            <Field label="Desde patch" hint="Carga universo y canales del fixture del patch">
+              <select
+                className="input select"
+                value={cue.patchId ?? ''}
+                onChange={(event) => {
+                  const entry = patchList.find((item) => item.id === event.target.value)
+                  if (!entry) {
+                    update(cue.id, { patchId: '' })
+                    return
+                  }
+                  const mode = fixtures
+                    .find((item) => item.id === entry.fixtureId)
+                    ?.modes.find((item) => item.name === entry.fixtureMode)
+                  const start = Math.max(1, Math.min(512, entry.startAddress))
+                  update(cue.id, {
+                    patchId: entry.id,
+                    universe: entry.universe,
+                    fixtureId: entry.fixtureId,
+                    fixtureMode: entry.fixtureMode,
+                    startAddress: start,
+                    channels: (mode?.channels ?? [])
+                      .map((channel) => ({
+                        channel: start + channel.offset - 1,
+                        value: 0,
+                        name: channel.name
+                      }))
+                      .filter((channel) => channel.channel >= 1 && channel.channel <= 512)
+                  })
+                }}
+              >
+                <option value="">— sin patch —</option>
+                {patchList.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label} · U{entry.universe} @{entry.startAddress}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <div className="field wide">
               <span className="field-label">Fixture</span>
               <div className="device-row">
@@ -1044,6 +1602,33 @@ export default function Inspector(): JSX.Element {
                 onChange={(midiChannel) => update(cue.id, { midiChannel })}
               />
             </Field>
+          </div>
+        </section>
+
+        <section className="insp-section">
+          <h3>Organización</h3>
+          <Field label="Lista" hint="Sub-cuelist del proyecto; vacío = lista principal">
+            <input
+              className="input"
+              value={cue.list ?? ''}
+              list="showcue-list-suggestions"
+              spellCheck={false}
+              placeholder="Principal"
+              onChange={(event) => update(cue.id, { list: event.target.value })}
+            />
+            <datalist id="showcue-list-suggestions">
+              {listSuggestions.map((list) => (
+                <option key={list} value={list} />
+              ))}
+            </datalist>
+          </Field>
+          <TagEditor
+            tags={cue.tags ?? []}
+            suggestions={tagSuggestions}
+            onChange={(tags) => update(cue.id, { tags })}
+          />
+          <div className="field-hint">
+            Escribe y pulsa Intro para crear una etiqueta. Se usan para filtrar la lista de cues.
           </div>
         </section>
 

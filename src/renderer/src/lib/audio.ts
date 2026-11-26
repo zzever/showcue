@@ -159,3 +159,16 @@ export async function requestDeviceLabels(): Promise<boolean> {
     return false
   }
 }
+
+/** Dispositivos de entrada/salida por tipo (micrófonos, cámaras, altavoces). */
+export async function listDevices(
+  kind: 'audioinput' | 'audiooutput' | 'videoinput'
+): Promise<MediaDeviceInfo[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return []
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    return devices.filter((device) => device.kind === kind)
+  } catch {
+    return []
+  }
+}

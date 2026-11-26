@@ -13,8 +13,71 @@ interface Layer {
   fade: number
 }
 
+/** Cámara en directo: la ventana de salida abre el dispositivo y lo muestra. */
+function CameraFeed({
+  payload,
+  onRegister
+}: {
+  payload: OutputPayload
+  onRegister: (element: HTMLVideoElement | null) => void
+}): JSX.Element {
+  const ref = useRef<HTMLVideoElement | null>(null)
+  const register = useRef(onRegister)
+  register.current = onRegister
+
+  useEffect(() => {
+    let stream: MediaStream | null = null
+    let cancelled = false
+    void (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: payload.cameraDeviceId
+            ? { deviceId: { exact: payload.cameraDeviceId } }
+            : true,
+          audio: false
+        })
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+        if (ref.current) {
+          ref.current.srcObject = stream
+          void ref.current.play().catch(() => undefined)
+          register.current(ref.current)
+        }
+      } catch {
+        /* sin permiso o sin cámara */
+      }
+    })()
+    return () => {
+      cancelled = true
+      stream?.getTracks().forEach((track) => track.stop())
+      register.current(null)
+    }
+  }, [payload.cameraDeviceId])
+
+  return (
+    <video
+      ref={ref}
+      className="output-media"
+      playsInline
+      muted
+      style={{ objectFit: fitCss(payload.fit) }}
+    />
+  )
+}
+
+/** Equivalencia entre el ajuste del cue y el object-fit del navegador. */
+function fitCss(fit: OutputPayload['fit']): 'contain' | 'cover' | 'fill' | 'none' {
+  if (fit === 'stretch') return 'fill'
+  if (fit === 'none') return 'none'
+  return fit === 'cover' ? 'cover' : 'contain'
+}
+
 export default function OutputView(): JSX.Element {
   const [layers, setLayers] = useState<Layer[]>([])
+  /** Rejilla de ajuste para alinear el proyector sobre la superficie. */
+  const [grid, setGrid] = useState(false)
   const sequence = useRef(0)
   const fadeTimers = useRef(new Map<string, number>())
   const activeTokens = useRef(new Map<string, number>())
@@ -67,6 +130,11 @@ export default function OutputView(): JSX.Element {
         return
       }
 
+      if (event.type === 'pattern') {
+        setGrid(event.on)
+        return
+      }
+
       // clear: sólo retira esa capa; las demás siguen en pantalla.
       const token = activeTokens.current.get(event.cueId)
       const fade = Math.max(0.05, event.fadeOut)
@@ -99,6 +167,7 @@ export default function OutputView(): JSX.Element {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') void api.outputFullscreen(false)
+      if (event.key.toLowerCase() === 'g') setGrid((value) => !value)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -113,10 +182,19 @@ export default function OutputView(): JSX.Element {
             className="output-layer"
             style={{
               opacity: layer.visible ? clamp(layer.payload.opacity, 0, 1) : 0,
-              transition: `opacity ${layer.fade}s ease`
+              transition: `opacity ${layer.fade}s ease`,
+              transform: `translate(${layer.payload.offsetX ?? 0}%, ${layer.payload.offsetY ?? 0}%) scale(${layer.payload.scale > 0 ? layer.payload.scale : 1}) rotate(${layer.payload.rotation ?? 0}deg)`
             }}
           >
-            {layer.payload.kind === 'video' ? (
+            {layer.payload.kind === 'camera' ? (
+              <CameraFeed
+                payload={layer.payload}
+                onRegister={(element) => {
+                  if (element) videoRefs.current.set(layer.id, element)
+                  else videoRefs.current.delete(layer.id)
+                }}
+              />
+            ) : layer.payload.kind === 'video' ? (
               <video
                 ref={(element) => {
                   if (element) videoRefs.current.set(layer.id, element)
@@ -126,7 +204,7 @@ export default function OutputView(): JSX.Element {
                 src={layer.payload.url}
                 autoPlay
                 playsInline
-                style={{ objectFit: layer.payload.fit }}
+                style={{ objectFit: fitCss(layer.payload.fit) }}
                 onLoadedMetadata={(event) => applySegment(event.currentTarget, layer.payload)}
                 onTimeUpdate={(event) => {
                   const video = event.currentTarget
@@ -148,12 +226,32 @@ export default function OutputView(): JSX.Element {
                 className="output-media"
                 src={layer.payload.url}
                 alt=""
-                style={{ objectFit: layer.payload.fit }}
+                style={{ objectFit: fitCss(layer.payload.fit) }}
               />
             )}
           </div>
         ))}
       </div>
+
+      {(grid || layers.some((layer) => layer.payload.testPattern)) && (
+        <div className="output-grid" aria-hidden>
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+            <defs>
+              <pattern id="gridSmall" width="5" height="5" patternUnits="userSpaceOnUse">
+                <path d="M 5 0 L 0 0 0 5" fill="none" stroke="rgba(90,210,255,0.28)" strokeWidth="0.15" />
+              </pattern>
+              <pattern id="gridBig" width="25" height="25" patternUnits="userSpaceOnUse">
+                <rect width="25" height="25" fill="url(#gridSmall)" />
+                <path d="M 25 0 L 0 0 0 25" fill="none" stroke="rgba(90,210,255,0.6)" strokeWidth="0.35" />
+              </pattern>
+            </defs>
+            <rect width="100" height="100" fill="url(#gridBig)" />
+            <circle cx="50" cy="50" r="35" fill="none" stroke="rgba(255,180,84,0.85)" strokeWidth="0.4" />
+            <path d="M 50 0 V 100 M 0 50 H 100" stroke="rgba(255,180,84,0.9)" strokeWidth="0.4" />
+            <rect x="5" y="5" width="90" height="90" fill="none" stroke="rgba(255,92,92,0.7)" strokeWidth="0.3" strokeDasharray="2 1" />
+          </svg>
+        </div>
+      )}
 
       {layers.length === 0 && (
         <div className="output-idle">
@@ -170,7 +268,7 @@ export default function OutputView(): JSX.Element {
             </svg>
           </div>
           <div className="output-label">Salida ShowCue</div>
-          <div className="output-hint">Doble clic para pantalla completa</div>
+          <div className="output-hint">Doble clic para pantalla completa · G para la rejilla de ajuste</div>
         </div>
       )}
     </div>

@@ -155,7 +155,121 @@ export default function SettingsDialog(): JSX.Element {
           </section>
 
           <section className="insp-section">
+            <h3>Grupos de altavoces</h3>
+            <p className="field-hint">
+              Rutas de sonido del equipo: cada grupo apunta a una salida y las pistas (cues de
+              audio) se asignan a un grupo desde el inspector.
+            </p>
+            <div className="patch-list">
+              {(settings.speakerGroups ?? []).length === 0 && (
+                <div className="field-hint">Todavía no hay grupos.</div>
+              )}
+              {(settings.speakerGroups ?? []).map((group) => (
+                <div className="patch-row" key={group.id}>
+                  <input
+                    className="input"
+                    value={group.name}
+                    onChange={(event) =>
+                      update({
+                        speakerGroups: (settings.speakerGroups ?? []).map((item) =>
+                          item.id === group.id ? { ...item, name: event.target.value } : item
+                        )
+                      })
+                    }
+                    aria-label="Nombre del grupo"
+                  />
+                  <select
+                    className="input select"
+                    value={group.deviceId}
+                    onChange={(event) =>
+                      update({
+                        speakerGroups: (settings.speakerGroups ?? []).map((item) =>
+                          item.id === group.id ? { ...item, deviceId: event.target.value } : item
+                        )
+                      })
+                    }
+                  >
+                    <option value="">Predeterminada del sistema</option>
+                    {devices.map((device, index) => (
+                      <option key={device.deviceId || index} value={device.deviceId}>
+                        {device.label || `Salida ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="slider-row group-level">
+                    <input
+                      type="range"
+                      className="slider"
+                      min={0}
+                      max={100}
+                      value={Math.round(group.level * 100)}
+                      onChange={(event) =>
+                        update({
+                          speakerGroups: (settings.speakerGroups ?? []).map((item) =>
+                            item.id === group.id
+                              ? { ...item, level: Number(event.target.value) / 100 }
+                              : item
+                          )
+                        })
+                      }
+                    />
+                    <span className="mono slider-value">{Math.round(group.level * 100)}%</span>
+                  </div>
+                  <button
+                    className="btn tiny ghost"
+                    title="Quitar grupo"
+                    onClick={() =>
+                      update({
+                        speakerGroups: (settings.speakerGroups ?? []).filter(
+                          (item) => item.id !== group.id
+                        )
+                      })
+                    }
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              className="btn small"
+              onClick={() =>
+                update({
+                  speakerGroups: [
+                    ...(settings.speakerGroups ?? []),
+                    {
+                      id: Math.random().toString(36).slice(2, 10),
+                      name: `Grupo ${(settings.speakerGroups ?? []).length + 1}`,
+                      deviceId: settings.defaultDeviceId || '',
+                      level: 1
+                    }
+                  ]
+                })
+              }
+            >
+              + Añadir grupo
+            </button>
+          </section>
+
+          <section className="insp-section">
             <h3>Disparo</h3>
+            <div className="field wide">
+              <span className="field-label">Prioridad con línea de tiempo</span>
+              <select
+                className="input select"
+                value={settings.timelinePriority ?? 'go'}
+                onChange={(event) =>
+                  update({ timelinePriority: event.target.value === 'timeline' ? 'timeline' : 'go' })
+                }
+              >
+                <option value="go">GO manual manda siempre</option>
+                <option value="timeline">La línea de tiempo bloquea el GO</option>
+              </select>
+              <span className="field-hint">
+                Con la segunda opción, mientras suena una línea de tiempo los GO se ignoran con un
+                aviso, para que nadie descuadre la secuencia.
+              </span>
+            </div>
             <div className="toggle-row">
               <Switch
                 checked={settings.hotkeysEnabled !== false}
@@ -196,6 +310,26 @@ export default function SettingsDialog(): JSX.Element {
                 IP del nodo DMX (Luminex, Enttec, etc.) o broadcast de la red, puerto 6454. Los
                 cues DMX envían ArtDmx (512 canales) y numeran los universos desde 0, como el
                 estándar Art-Net.
+              </span>
+            </div>
+            <div className="toggle-row">
+              <Switch
+                checked={settings.artnetInEnabled === true}
+                onChange={(artnetInEnabled) => update({ artnetInEnabled })}
+                label="Recibir Art-Net"
+              />
+            </div>
+            <div className="field wide">
+              <span className="field-label">Puerto de entrada</span>
+              <input
+                className="input mono"
+                style={{ width: 100 }}
+                value={settings.artnetInPort ?? 6454}
+                onChange={(event) => update({ artnetInPort: toNumber(event.target.value, 6454) })}
+              />
+              <span className="field-hint">
+                Escucha ArtDmx entrante para el monitor y el modo directo del grid DMX. Si otra
+                aplicación de la máquina ocupa el 6454, cambia el puerto aquí.
               </span>
             </div>
           </section>

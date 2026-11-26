@@ -45,6 +45,8 @@ let mainWindow: BrowserWindow | null = null
 const outputWindows = new Map<string, BrowserWindow>()
 /** Capas de salida activas por cue, para reabrir la ventana sin perder imagen. */
 const outputLayers = new Map<string, OutputEvent & { type: 'show' }>()
+/** Rejilla de ajuste activa por salida (se restaura al reabrir la ventana). */
+const outputPatterns = new Map<string, boolean>()
 /** Pantalla en la que se disparó cada cue (para enrutar clear/pause/resume). */
 const cueDisplay = new Map<string, string>()
 
@@ -94,11 +96,16 @@ const defaultSettings: AppSettings = {
   oscListenEnabled: false,
   oscListenPort: 9000,
   oscPrefix: '/showcue',
-  oscGma3: false
+  oscGma3: false,
+  artnetInEnabled: false,
+  artnetInPort: 6454,
+  speakerGroups: [],
+  timelinePriority: 'go'
 }
 
 // ------------------------------------------------------------- Art-Net (DMX)
 let dmxSocket: UdpSocket | null = null
+let inputSocket: UdpSocket | null = null
 let dmxSequence = 0
 
 function ensureDmxSocket(): UdpSocket {
@@ -114,6 +121,52 @@ function ensureDmxSocket(): UdpSocket {
   })
   dmxSocket = socket
   return socket
+}
+
+/**
+ * Art-Net de entrada: escucha ArtDmx de la mesa o del nodo y lo reenvía a la
+ * interfaz para el monitor y el modo directo del grid DMX.
+ */
+function stopArtnetInput(): void {
+  if (!inputSocket) return
+  try {
+    inputSocket.close()
+  } catch {
+    /* ya cerrado */
+  }
+  inputSocket = null
+}
+
+function startArtnetInput(port: number): boolean {
+  stopArtnetInput()
+  const listenPort = Math.max(1024, Math.min(65535, Math.round(port) || 6454))
+  try {
+    const socket = createSocket({ type: 'udp4', reuseAddr: true })
+    socket.on('message', (message, info) => {
+      if (message.length < 18) return
+      if (message.toString('latin1', 0, 8) !== 'Art-Net\0') return
+      if (message.readUInt16LE(8) !== 0x5000) return
+      const subUni = message.readUInt8(14)
+      const net = message.readUInt8(15) & 0x7f
+      const universe = (net << 8) | subUni
+      const length = Math.min(512, message.readUInt16BE(16))
+      const values = new Array<number>(512).fill(0)
+      for (let index = 0; index < length; index += 1) values[index] = message.readUInt8(18 + index)
+      mainWindow?.webContents.send('dmx:in', {
+        universe,
+        values,
+        host: info.address,
+        at: Date.now()
+      })
+    })
+    socket.on('error', (err) => console.error('Art-Net entrada', err))
+    socket.bind(listenPort)
+    inputSocket = socket
+    return true
+  } catch (err) {
+    console.error('Art-Net entrada', err)
+    return false
+  }
 }
 
 /** Paquete ArtDmx (OpCode 0x5000) con los 512 canales de un universo. */
@@ -600,6 +653,7 @@ function displayForCue(cueId: string): string {
 
 function targetDisplayFor(ev: OutputEvent): string {
   if (ev.type === 'show') return outputKey(ev.payload.displayId)
+  if (ev.type === 'pattern') return outputKey(ev.displayId)
   return displayForCue(ev.cueId)
 }
 
@@ -648,6 +702,8 @@ function createOutputWindow(displayId: string): BrowserWindow {
     for (const layer of outputLayers.values()) {
       if (outputKey(layer.payload.displayId) === key) win.webContents.send('output:event', layer)
     }
+    const pattern = outputPatterns.get(key)
+    if (pattern) win.webContents.send('output:event', { type: 'pattern', displayId: key, on: true })
   })
   win.on('closed', () => {
     outputWindows.delete(key)
@@ -671,12 +727,15 @@ function sendToOutput(ev: OutputEvent): void {
   } else if (ev.type === 'clear') {
     outputLayers.delete(ev.cueId)
     cueDisplay.delete(ev.cueId)
+  } else if (ev.type === 'pattern') {
+    // Se recuerda para que la ventana la recupere si se vuelve a abrir.
+    outputPatterns.set(key, ev.on)
   }
 
   const win = outputWindows.get(key)
   if (!win || win.isDestroyed()) {
-    // Sólo un "show" abre ventanas; la ventana nueva reproduce las capas al cargar.
-    if (ev.type === 'show') createOutputWindow(key)
+    // Sólo "show" y "pattern" abren ventanas; la nueva reproduce el estado al cargar.
+    if (ev.type === 'show' || ev.type === 'pattern') createOutputWindow(key)
     return
   }
   const wc = win.webContents
@@ -900,6 +959,16 @@ function registerIpc(): void {
     await writeSettings(settings)
     if (settings.oscListenEnabled) ensureOscListener(settings.oscListenPort)
     else stopOscListener()
+    if (settings.artnetInEnabled) startArtnetInput(settings.artnetInPort)
+    else stopArtnetInput()
+  })
+
+  ipcMain.handle('dmx:input', async (_e, enabled: boolean, port: number) => {
+    if (!enabled) {
+      stopArtnetInput()
+      return false
+    }
+    return startArtnetInput(port)
   })
 
   ipcMain.handle(
@@ -1085,6 +1154,7 @@ app.whenReady().then(() => {
   // Preparar el socket Art-Net si el operador ya lo tenía activado.
   void readSettings().then((settings) => {
     if (settings.artnetEnabled) ensureDmxSocket()
+    if (settings.artnetInEnabled) startArtnetInput(settings.artnetInPort)
     if (settings.oscListenEnabled) ensureOscListener(settings.oscListenPort)
   })
 

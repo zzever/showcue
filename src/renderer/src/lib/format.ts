@@ -62,6 +62,7 @@ export function cueDuration(cue: Cue, byId: Map<string, Cue>, depth = 0): number
       return one
     }
     case 'video': {
+      if (cue.loop) return Number.POSITIVE_INFINITY
       if (cue.duration > 0) return cue.duration
       if (cue.mediaKind === 'image') return 5
       const start = Math.max(0, cue.startTime ?? 0)
@@ -71,6 +72,12 @@ export function cueDuration(cue: Cue, byId: Map<string, Cue>, depth = 0): number
     case 'wait':
     case 'memo':
       return cue.duration
+    case 'random':
+      // Dispara al azar y no bloquea la lista: el cue siguiente puede ir enseguida.
+      return 0
+    case 'timeline':
+      if (cue.duration > 0) return cue.duration
+      return cue.entries.reduce((max, entry) => Math.max(max, entry.at), 0)
     case 'stop':
       return cue.fadeOut
     case 'fade':
@@ -95,6 +102,7 @@ export function cueDuration(cue: Cue, byId: Map<string, Cue>, depth = 0): number
 }
 
 export function targetNames(cue: Cue, byId: Map<string, Cue>): string {
+  if (cue.type === 'random') return `${cue.members.length} al azar`
   if (cue.type !== 'stop' && cue.type !== 'fade') return ''
   return cue.targets
     .map((id) => byId.get(id)?.number ?? '?')

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   AppSettings,
   DisplayInfo,
+  DmxInput,
   FixtureProfile,
   MediaFile,
   OscTrigger,
@@ -36,6 +37,15 @@ const api: ShowCueApi = {
     ipcRenderer.invoke('fixtures:remove', id),
   dmxSend: (universe: number, values: number[]): Promise<void> =>
     ipcRenderer.invoke('dmx:send', universe, values),
+  setArtnetInput: (enabled: boolean, port: number): Promise<boolean> =>
+    ipcRenderer.invoke('dmx:input', enabled, port),
+  onDmxIn: (cb: (input: DmxInput) => void) => {
+    const listener = (_event: unknown, input: DmxInput): void => cb(input)
+    ipcRenderer.on('dmx:in', listener)
+    return () => {
+      ipcRenderer.removeListener('dmx:in', listener)
+    }
+  },
   notifyCue: (
     cue: { number: string; name: string; type: string },
     action: 'go' | 'panic'

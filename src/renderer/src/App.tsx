@@ -16,6 +16,8 @@ import StatusBar from './components/StatusBar'
 import Toasts from './components/Toasts'
 import SettingsDialog from './components/SettingsDialog'
 import ShortcutsDialog from './components/ShortcutsDialog'
+import DmxPanel from './components/DmxPanel'
+import PatchDialog from './components/PatchDialog'
 
 export default function App(): JSX.Element {
   const [ready, setReady] = useState(false)
@@ -29,6 +31,12 @@ export default function App(): JSX.Element {
   const masterVolume = useShowStore((state) => state.masterVolume)
   const settingsOpen = useShowStore((state) => state.settingsOpen)
   const shortcutsOpen = useShowStore((state) => state.shortcutsOpen)
+  const dmxOpen = useShowStore((state) => state.dmxOpen)
+  const patchOpen = useShowStore((state) => state.patchOpen)
+  const recording = useShowStore((state) => state.recording !== null)
+  const speakerGroups = useShowStore((state) => state.settings.speakerGroups)
+  const artnetInEnabled = useShowStore((state) => state.settings.artnetInEnabled === true)
+  const artnetInPort = useShowStore((state) => state.settings.artnetInPort)
   const standbyId = useShowStore((state) => state.standbyId)
   const hotkeysEnabled = useShowStore((state) => state.settings.hotkeysEnabled !== false)
   const midiEnabled = useShowStore((state) => state.settings.midiEnabled !== false)
@@ -51,6 +59,7 @@ export default function App(): JSX.Element {
       onError: (message) => getStore().toast(message, 'error'),
       onCueGo: (cue) => {
         void api.notifyCue({ number: cue.number, name: cue.name, type: cue.type }, 'go')
+        getStore().captureRecord(cue.id)
       },
       onPanic: () => {
         void api.notifyCue({ number: '', name: '', type: '' }, 'panic')
@@ -67,6 +76,16 @@ export default function App(): JSX.Element {
   useEffect(() => {
     setMasterLevel(masterVolume)
   }, [masterVolume])
+
+  // Grupos de altavoces del equipo de sonido.
+  useEffect(() => {
+    player.setSpeakerGroups(speakerGroups ?? [])
+  }, [speakerGroups])
+
+  // Escucha Art-Net si el operador la dejó activada.
+  useEffect(() => {
+    void api.setArtnetInput(artnetInEnabled, artnetInPort ?? 6454).catch(() => undefined)
+  }, [artnetInEnabled, artnetInPort])
 
   useEffect(() => {
     const tick = (): void => {
@@ -223,6 +242,10 @@ export default function App(): JSX.Element {
     void unlockAudio()
     if (showStartRef.current === null) showStartRef.current = performance.now()
     const state = getStore()
+    if (state.settings.timelinePriority === 'timeline' && player.timelineRunning()) {
+      state.toast('La línea de tiempo tiene prioridad: GO bloqueado', 'info')
+      return
+    }
     const id = targetId ?? state.standbyId
     const cue = state.cues.find((candidate) => candidate.id === id)
     if (!cue) {
@@ -304,7 +327,17 @@ export default function App(): JSX.Element {
   }, [addFiles])
 
   // ------------------------------------------------------------------- archivos
+  /** Aviso antes de perder cambios sin guardar. */
+  const confirmDiscard = useCallback((): boolean => {
+    const state = getStore()
+    if (state.cues.length === 0 || state.saveState === 'saved') return true
+    return window.confirm(
+      'El show tiene cambios sin guardar. ¿Quieres continuar y descartarlos?'
+    )
+  }, [])
+
   const openShow = useCallback(async () => {
+    if (!confirmDiscard()) return
     const result = await api.openShow()
     if (!result) return
     player.stopAll(0)
@@ -316,6 +349,7 @@ export default function App(): JSX.Element {
   }, [])
 
   const newShow = useCallback(() => {
+    if (!confirmDiscard()) return
     player.stopAll(0)
     showStartRef.current = null
     setShowElapsed(null)
@@ -566,6 +600,19 @@ export default function App(): JSX.Element {
         standby={standby}
         hotkeysEnabled={hotkeysEnabled}
         onToggleHotkeys={toggleHotkeys}
+        onOpenDmx={() => getStore().setDmxOpen(true)}
+        recording={recording}
+        onToggleRecord={() => {
+          const state = getStore()
+          if (state.recording) {
+            const cue = state.stopRecording()
+            if (cue) state.toast('Línea de tiempo creada', 'success')
+            else state.toast('Grabación vacía: no se creó ninguna línea de tiempo', 'info')
+          } else {
+            state.startRecording()
+            state.toast('Grabando línea de tiempo: pulsa GO en cada cue', 'info')
+          }
+        }}
       />
 
       <main className="workspace">
@@ -578,6 +625,13 @@ export default function App(): JSX.Element {
       <Toasts />
       {settingsOpen && <SettingsDialog />}
       {shortcutsOpen && <ShortcutsDialog />}
+      {dmxOpen && (
+        <DmxPanel
+          onClose={() => getStore().setDmxOpen(false)}
+          onOpenPatch={() => getStore().setPatchOpen(true)}
+        />
+      )}
+      {patchOpen && <PatchDialog onClose={() => getStore().setPatchOpen(false)} />}
 
       {dragging && (
         <div className="drop-overlay">

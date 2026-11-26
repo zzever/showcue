@@ -4,7 +4,17 @@
  * independientes del equipo (Windows / Linux / macOS).
  */
 
-export type CueType = 'audio' | 'video' | 'group' | 'wait' | 'stop' | 'fade' | 'memo' | 'dmx'
+export type CueType =
+  | 'audio'
+  | 'video'
+  | 'group'
+  | 'random'
+  | 'wait'
+  | 'stop'
+  | 'fade'
+  | 'memo'
+  | 'dmx'
+  | 'timeline'
 
 export interface CueBase {
   id: string
@@ -26,10 +36,35 @@ export interface CueBase {
   midiNote: number
   /** Canal MIDI (1-16) o 0 = cualquier canal. */
   midiChannel: number
+  /** Etiquetas libres para agrupar y filtrar cues ("telón", "boda", "cámara 2"...). */
+  tags: string[]
+  /** Sub-lista del show a la que pertenece el cue ('' = lista principal). */
+  list: string
+}
+
+/** Cómo encaja la imagen en la superficie de proyección. */
+export type FitMode = 'contain' | 'cover' | 'stretch' | 'none'
+
+/** Ecualización básica por cue: tres bandas y filtro de graves. */
+export interface AudioEq {
+  /** Ganancia de graves en dB (-12..12). */
+  low: number
+  /** Ganancia de medios en dB (-12..12). */
+  mid: number
+  /** Ganancia de agudos en dB (-12..12). */
+  high: number
+  /** Frecuencia del filtro paso alto en Hz; 0 = desactivado. */
+  highPass: number
 }
 
 export interface AudioCue extends CueBase {
   type: 'audio'
+  /** Archivo del disco o entrada de micrófono. */
+  sourceKind: 'file' | 'microphone'
+  /** deviceId de entrada cuando sourceKind = 'microphone'. */
+  inputDeviceId: string
+  /** Grupo de altavoces ('' = usar el deviceId del propio cue). */
+  groupId: string
   filePath: string
   fileName: string
   /** Duración real del archivo en segundos (0 si no se pudo leer). */
@@ -51,10 +86,16 @@ export interface AudioCue extends CueBase {
   deviceId: string
   /** Curva del fade de entrada/salida. */
   fadeCurve: 'linear' | 'exponential' | 's' | 'log'
+  /** Ecualización y filtro de graves aplicados a la reproducción. */
+  eq: AudioEq
 }
 
 export interface VideoCue extends CueBase {
   type: 'video'
+  /** Archivo del disco, imagen o entrada de cámara. */
+  sourceKind: 'file' | 'camera'
+  /** deviceId de la cámara cuando sourceKind = 'camera'. */
+  cameraDeviceId: string
   filePath: string
   fileName: string
   mediaKind: 'video' | 'image'
@@ -75,7 +116,17 @@ export interface VideoCue extends CueBase {
   loop: boolean
   /** 0..1 */
   opacity: number
-  fit: 'contain' | 'cover'
+  fit: FitMode
+  /** Escala uniforme sobre el encuadre (0.1..4). 1 = tamaño calculado por el ajuste. */
+  scale: number
+  /** Desplazamiento horizontal en % del ancho de la superficie. */
+  offsetX: number
+  /** Desplazamiento vertical en % del alto de la superficie. */
+  offsetY: number
+  /** Rotación en grados. */
+  rotation: number
+  /** Convertir la salida en una rejilla de ajuste para alinear el proyector. */
+  testPattern: boolean
 }
 
 export interface GroupMember {
@@ -87,6 +138,16 @@ export interface GroupMember {
 export interface GroupCue extends CueBase {
   type: 'group'
   members: GroupMember[]
+}
+
+export interface RandomCue extends CueBase {
+  type: 'random'
+  /** Cues entre los que se elige al azar en cada GO. */
+  members: string[]
+  /** Cuántos se disparan en cada GO (1 = un logo por pulsación). */
+  count: number
+  /** Recorre todo el grupo antes de repetir un cue. */
+  avoidRepeat: boolean
 }
 
 export interface WaitCue extends CueBase {
@@ -129,6 +190,8 @@ export interface DmxCue extends CueBase {
   channels: DmxChannel[]
   /** Segundos que tarda en alcanzar los valores (0 = cambio inmediato). */
   fade: number
+  /** Entrada del patch del proyecto que define este cue. */
+  patchId?: string
   /** Perfil de fixture aplicado (librería DMX/GDTF). */
   fixtureId?: string
   fixtureMode?: string
@@ -158,6 +221,53 @@ export interface FixtureProfile {
   importedAt: number
 }
 
+// ------------------------------------------------------------------- patch
+export interface PatchFixture {
+  id: string
+  /** Nombre visible en el patch ("PAR 1", "Mover lateral"...). */
+  label: string
+  fixtureId: string
+  fixtureMode: string
+  /** Universo Art-Net (0-based). */
+  universe: number
+  /** Dirección DMX inicial, 1..512. */
+  startAddress: number
+  /** Canales que ocupa el modo. */
+  channelCount: number
+}
+
+/** Grupo de altavoces: un destino de audio con nombre y nivel propios. */
+export interface SpeakerGroup {
+  id: string
+  name: string
+  /** deviceId de salida ('' = predeterminada del sistema). */
+  deviceId: string
+  /** Nivel relativo 0..1 aplicado a todas las pistas del grupo. */
+  level: number
+}
+
+// ---------------------------------------------------------------- timeline
+export interface TimelineEntry {
+  /** Segundo, contado desde el GO de la línea de tiempo. */
+  at: number
+  cueId: string
+}
+
+export interface TimelineCue extends CueBase {
+  type: 'timeline'
+  entries: TimelineEntry[]
+  /** Duración total; 0 = hasta el último evento. */
+  duration: number
+}
+
+/** Datos Art-Net recibidos, para el monitor y el modo directo. */
+export interface DmxInput {
+  universe: number
+  values: number[]
+  host: string
+  at: number
+}
+
 export interface DisplayInfo {
   id: string
   label: string
@@ -171,11 +281,13 @@ export type Cue =
   | AudioCue
   | VideoCue
   | GroupCue
+  | RandomCue
   | WaitCue
   | MemoCue
   | StopCue
   | FadeCue
   | DmxCue
+  | TimelineCue
 
 export interface ShowFile {
   format: 'showcue'
@@ -183,6 +295,8 @@ export interface ShowFile {
   title: string
   masterVolume: number
   cues: Cue[]
+  /** Patch de DMX del proyecto: todos los fixtures con su universo y dirección. */
+  patch?: PatchFixture[]
 }
 
 export interface AppSettings {
@@ -211,6 +325,14 @@ export interface AppSettings {
   oscPrefix: string
   /** Además de las direcciones propias, envía /gma3/cmd a grandMA3. */
   oscGma3: boolean
+  /** Escucha Art-Net entrante (monitor y modo directo). */
+  artnetInEnabled: boolean
+  /** Puerto UDP local para Art-Net de entrada. */
+  artnetInPort: number
+  /** Grupos de altavoces del equipo de sonido. */
+  speakerGroups: SpeakerGroup[]
+  /** Quién manda mientras suena una línea de tiempo. */
+  timelinePriority: 'go' | 'timeline'
 }
 
 export interface RdmDevice {
@@ -251,7 +373,9 @@ export interface OutputPayload {
   /** Salida de audio del video ('' = predeterminada). */
   deviceId: string
   url: string
-  kind: 'video' | 'image'
+  kind: 'video' | 'image' | 'camera'
+  /** deviceId de la cámara cuando kind = 'camera'. */
+  cameraDeviceId: string
   volume: number
   loop: boolean
   /** Segundo del archivo donde empieza la reproducción. */
@@ -261,7 +385,12 @@ export interface OutputPayload {
   fadeIn: number
   fadeOut: number
   opacity: number
-  fit: 'contain' | 'cover'
+  fit: FitMode
+  scale: number
+  offsetX: number
+  offsetY: number
+  rotation: number
+  testPattern: boolean
 }
 
 export type OutputEvent =
@@ -269,6 +398,8 @@ export type OutputEvent =
   | { type: 'clear'; cueId: string; fadeOut: number }
   | { type: 'pause'; cueId: string }
   | { type: 'resume'; cueId: string }
+  /** Enciende o apaga la rejilla de ajuste de una salida, sin ejecutar ningún cue. */
+  | { type: 'pattern'; displayId: string; on: boolean }
 
 export interface ShowCueApi {
   platform: string
@@ -292,6 +423,10 @@ export interface ShowCueApi {
   removeFixture(id: string): Promise<FixtureProfile[]>
   /** Envía un universo DMX completo (512 bytes) por Art-Net. */
   dmxSend(universe: number, values: number[]): Promise<void>
+  /** Activa o desactiva la escucha de Art-Net entrante. */
+  setArtnetInput(enabled: boolean, port: number): Promise<boolean>
+  /** Valores Art-Net recibidos (monitor y modo directo). */
+  onDmxIn(cb: (input: DmxInput) => void): () => void
   /** Avisa por OSC del disparo de un cue (Go) o de un pánico. */
   notifyCue(cue: { number: string; name: string; type: string }, action: 'go' | 'panic'): Promise<void>
   /** Pide la tabla de dispositivos RDM del universo y lee cada uno. */

@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import type { Cue } from '@shared/types'
-import { useShowStore } from '../lib/store'
+import { ALL_LISTS, useShowStore } from '../lib/store'
 import { player } from '../lib/player'
 import type { RunView } from '../lib/player'
 import { cueByIdMap, cueDuration, formatClock, targetNames } from '../lib/format'
 import { cueTypeLabel } from '../lib/cues'
+import { allTags, tagColor } from '../lib/tags'
 
 interface Props {
   runs: Record<string, RunView>
@@ -123,6 +124,15 @@ function CueRow({
               !
             </span>
           )}
+          {(cue.tags ?? []).map((tag) => (
+            <span
+              key={tag}
+              className="tag-chip small"
+              style={{ color: tagColor(tag), borderColor: `${tagColor(tag)}44` }}
+            >
+              {tag}
+            </span>
+          ))}
         </div>
         {cue.notes && <div className="cue-notes">{cue.notes}</div>}
       </div>
@@ -157,9 +167,27 @@ export default function CueList({ runs, onGo, onStop }: Props): JSX.Element {
   const missing = useShowStore((state) => state.missing)
   const select = useShowStore((state) => state.select)
   const setStandby = useShowStore((state) => state.setStandby)
+  const activeList = useShowStore((state) => state.activeList)
+  const setActiveList = useShowStore((state) => state.setActiveList)
+  const updateCue = useShowStore((state) => state.updateCue)
+  const trash = useShowStore((state) => state.trash)
+  const restoreLast = useShowStore((state) => state.restoreLast)
+  const toast = useShowStore((state) => state.toast)
   const [search, setSearch] = useState('')
+  const [activeTags, setActiveTags] = useState<string[]>([])
+  const [expanded, setExpanded] = useState<string[]>([])
 
   const byId = useMemo(() => cueByIdMap(cues), [cues])
+  const tags = useMemo(() => allTags(cues), [cues])
+  const lists = useMemo(() => {
+    const set = new Set<string>([''])
+    for (const cue of cues) set.add(cue.list ?? '')
+    return [...set].sort((a, b) => {
+      if (a === '') return -1
+      if (b === '') return 1
+      return a.localeCompare(b, 'es')
+    })
+  }, [cues])
 
   // Permite mover la espera con las flechas aunque el foco esté en el buscador.
   const stepStandby = (delta: number): void => {
@@ -173,17 +201,51 @@ export default function CueList({ runs, onGo, onStop }: Props): JSX.Element {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return cues
     return cues.filter((cue) => {
-      const hay = [cue.number, cue.name, cue.notes, cue.type, targetNames(cue, byId)]
+      if (activeList !== ALL_LISTS && (cue.list ?? '') !== activeList) return false
+      if (activeTags.length > 0) {
+        const cueTags = cue.tags ?? []
+        if (!activeTags.some((tag) => cueTags.includes(tag))) return false
+      }
+      if (!q) return true
+      const hay = [cue.number, cue.name, cue.notes, cue.type, (cue.tags ?? []).join(' '), targetNames(cue, byId)]
         .join(' ')
         .toLowerCase()
       return hay.includes(q)
     })
-  }, [cues, search, byId])
+  }, [cues, search, byId, activeTags, activeList])
 
   return (
     <section className="list-pane">
+      <div className="list-tabs" role="tablist" aria-label="Sub-listas">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeList === ALL_LISTS}
+          className={`list-tab ${activeList === ALL_LISTS ? 'on' : ''}`}
+          onClick={() => setActiveList(ALL_LISTS)}
+        >
+          Todas<span className="list-tab-count mono">{cues.length}</span>
+        </button>
+        {lists.map((list) => {
+          const count = cues.filter((cue) => (cue.list ?? '') === list).length
+          return (
+            <button
+              key={list || 'main'}
+              type="button"
+              role="tab"
+              aria-selected={activeList === list}
+              className={`list-tab ${activeList === list ? 'on' : ''}`}
+              onClick={() => setActiveList(list)}
+              title={list ? `Lista «${list}»` : 'Lista principal'}
+            >
+              {list || 'Principal'}
+              <span className="list-tab-count mono">{count}</span>
+            </button>
+          )
+        })}
+      </div>
+
       <div className="list-toolbar">
         <input
           className="input"
@@ -202,10 +264,55 @@ export default function CueList({ runs, onGo, onStop }: Props): JSX.Element {
             }
           }}
         />
+        {trash.length > 0 && (
+          <button
+            className="btn tiny ghost"
+            title={`Recuperar el último cue eliminado (${trash.length} en la papelera)`}
+            onClick={() => {
+              const cue = restoreLast()
+              if (cue) toast(`Cue recuperado: ${cue.number} · ${cue.name}`, 'success')
+            }}
+          >
+            ↺ {trash.length}
+          </button>
+        )}
         <span className="list-count mono">
           {filtered.length}/{cues.length}
         </span>
       </div>
+      {tags.length > 0 && (
+        <div className="tag-filter">
+          {tags.map((tag) => {
+            const active = activeTags.includes(tag)
+            return (
+              <button
+                key={tag}
+                type="button"
+                className={`tag-chip filter ${active ? 'on' : ''}`}
+                style={{ color: tagColor(tag), borderColor: active ? tagColor(tag) : `${tagColor(tag)}44` }}
+                onClick={() =>
+                  setActiveTags((prev) =>
+                    prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]
+                  )
+                }
+                title={active ? 'Quitar filtro' : 'Filtrar por esta etiqueta'}
+              >
+                {tag}
+              </button>
+            )
+          })}
+          {activeTags.length > 0 && (
+            <button
+              type="button"
+              className="tag-clear"
+              onClick={() => setActiveTags([])}
+              title="Quitar todos los filtros"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
       <div className="list-head cue-grid">
         <div className="cell cell-num">#</div>
         <div className="cell cell-type">Tipo</div>
@@ -239,23 +346,95 @@ export default function CueList({ runs, onGo, onStop }: Props): JSX.Element {
         {filtered.map((cue) => {
           const duration = cueDuration(cue, byId)
           const filePath = cue.type === 'audio' || cue.type === 'video' ? cue.filePath : ''
+          const isGroup = cue.type === 'group'
+          const open = isGroup && expanded.includes(cue.id)
           return (
-            <CueRow
+            <div
               key={cue.id}
-              cue={cue}
-              duration={duration}
-              selected={selectedId === cue.id}
-              standby={standbyId === cue.id}
-              run={runs[cue.id]}
-              missing={!!filePath && missing[filePath] === false}
-              targets={targetNames(cue, byId)}
-              onSelect={(id) => {
-                select(id)
-                setStandby(id)
+              className="cue-drag-wrap"
+              draggable
+              onDragStart={(event) => {
+                event.dataTransfer.setData('text/cue-id', cue.id)
+                event.dataTransfer.effectAllowed = 'link'
               }}
-              onGo={onGo}
-              onStop={onStop}
-            />
+              onDragOver={
+                isGroup
+                  ? (event) => {
+                      if (!event.dataTransfer.types.includes('text/cue-id')) return
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'link'
+                    }
+                  : undefined
+              }
+              onDrop={
+                isGroup
+                  ? (event) => {
+                      event.preventDefault()
+                      const droppedId = event.dataTransfer.getData('text/cue-id')
+                      if (!droppedId || droppedId === cue.id) return
+                      if (cue.type !== 'group') return
+                      if (cue.members.some((member) => member.cueId === droppedId)) return
+                      updateCue(cue.id, {
+                        members: [...cue.members, { cueId: droppedId, delay: 0 }]
+                      })
+                      setExpanded((prev) => (prev.includes(cue.id) ? prev : [...prev, cue.id]))
+                    }
+                  : undefined
+              }
+            >
+              <CueRow
+                cue={cue}
+                duration={duration}
+                selected={selectedId === cue.id}
+                standby={standbyId === cue.id}
+                run={runs[cue.id]}
+                missing={!!filePath && missing[filePath] === false}
+                targets={targetNames(cue, byId)}
+                onSelect={(id) => {
+                  select(id)
+                  setStandby(id)
+                }}
+                onGo={onGo}
+                onStop={onStop}
+              />
+
+              {isGroup && (
+                <div className="group-children">
+                  <button
+                    type="button"
+                    className="group-toggle"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setExpanded((prev) =>
+                        prev.includes(cue.id)
+                          ? prev.filter((id) => id !== cue.id)
+                          : [...prev, cue.id]
+                      )
+                    }}
+                  >
+                    {open ? '▾' : '▸'} {cue.members.length} miembro(s)
+                  </button>
+                  {open &&
+                    cue.members.map((member) => {
+                      const child = byId.get(member.cueId)
+                      return (
+                        <div className="group-child" key={member.cueId}>
+                          <span className="mono group-child-num">
+                            {child?.number ?? '?'}
+                          </span>
+                          <span className="group-child-name">{child?.name ?? 'Cue eliminado'}</span>
+                          {member.delay > 0 && (
+                            <span className="mono group-child-delay">+{member.delay}s</span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  {open && cue.members.length === 0 && (
+                    <div className="group-child muted">Arrastra cues aquí para añadirlos</div>
+                  )}
+                </div>
+              )}
+            </div>
           )
         })}
       </div>

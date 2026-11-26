@@ -1,4 +1,4 @@
-import type { AudioCue, Cue, DmxCue, GroupCue, StopCue, VideoCue } from '@shared/types'
+import type { AudioCue, Cue, DmxCue, GroupCue, SpeakerGroup, StopCue, VideoCue } from '@shared/types'
 import { api } from './bridge'
 import { loadBuffer, outputBus } from './audio'
 import { clamp, cueByIdMap, cueDuration } from './format'
@@ -80,6 +80,10 @@ export class Player {
   private tails = new Set<number>()
   /** Último valor enviado a cada universo DMX, para poder hacer fades. */
   private dmxState = new Map<number, Uint8Array>()
+  /** Historial por cue aleatorio, para no repetir hasta agotar el grupo. */
+  private randomHistory = new Map<string, string[]>()
+  /** Grupos de altavoces del proyecto (destino y nivel por pista). */
+  private speakerGroups: SpeakerGroup[] = []
   private listeners = new Set<(runs: Record<string, RunView>) => void>()
   private interval: number | null = null
 
@@ -105,6 +109,16 @@ export class Player {
     this.onError = options.onError
     this.onCueGo = options.onCueGo ?? (() => undefined)
     this.onPanic = options.onPanic ?? (() => undefined)
+  }
+
+  setSpeakerGroups(groups: SpeakerGroup[]): void {
+    this.speakerGroups = Array.isArray(groups) ? groups : []
+  }
+
+  /** ¿Hay una línea de tiempo en curso? Sirve para resolver la prioridad GO/timeline. */
+  timelineRunning(): boolean {
+    for (const run of this.runs.values()) if (run.cue.type === 'timeline') return true
+    return false
   }
 
   subscribe(listener: (runs: Record<string, RunView>) => void): () => void {
@@ -237,6 +251,12 @@ export class Player {
         break
       case 'group':
         this.startGroup(cue)
+        break
+      case 'random':
+        this.startRandom(cue)
+        break
+      case 'timeline':
+        this.startTimeline(cue)
         break
       case 'wait':
       case 'memo':
@@ -412,7 +432,91 @@ export class Player {
     this.trackRun(run, timer)
   }
 
+  /** Destino y nivel según el grupo de altavoces del cue. */
+  private routeFor(cue: AudioCue): { deviceId: string; level: number } {
+    if (!cue.groupId) return { deviceId: cue.deviceId, level: 1 }
+    const group = this.speakerGroups.find((item) => item.id === cue.groupId)
+    if (!group) return { deviceId: cue.deviceId, level: 1 }
+    return { deviceId: group.deviceId, level: clamp(group.level, 0, 1) }
+  }
+
+  /** Entrada de micrófono en directo, enrutada como una pista más. */
+  private async startMicrophone(cue: AudioCue): Promise<void> {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this.onError('Este equipo no permite capturar el micrófono')
+      return
+    }
+    const route = this.routeFor(cue)
+    const { ctx, master } = outputBus(route.deviceId)
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: cue.inputDeviceId ? { deviceId: { exact: cue.inputDeviceId } } : true
+      })
+    } catch (err) {
+      this.onError(`No se pudo abrir el micrófono (${(err as Error).message})`)
+      return
+    }
+
+    const source = ctx.createMediaStreamSource(stream)
+    const gain = ctx.createGain()
+    gain.gain.value = clamp(cue.volume, 0, 1) * route.level
+    const panner = ctx.createStereoPanner()
+    panner.pan.value = clamp(cue.pan, -1, 1)
+    source.connect(gain)
+    gain.connect(panner)
+    panner.connect(master)
+
+    const tracks = stream.getAudioTracks()
+    const run: Run = {
+      cue,
+      duration: Number.POSITIVE_INFINITY,
+      startPerf: performance.now(),
+      timers: [],
+      cancelled: false,
+      paused: false,
+      pauseStartPerf: 0,
+      accumulatedPauseMs: 0,
+      customPause: false,
+      resumeOffset: 0,
+      cancel: () => {
+        run.cancelled = true
+        for (const track of tracks) track.stop()
+        try {
+          source.disconnect()
+          gain.disconnect()
+          panner.disconnect()
+        } catch {
+          /* ya desconectado */
+        }
+        this.runs.delete(cue.id)
+        this.notify()
+      },
+      fadeTo: (target, duration) => {
+        const now = ctx.currentTime
+        gain.gain.cancelScheduledValues(now)
+        gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), now)
+        gain.gain.linearRampToValueAtTime(
+          Math.max(clamp(target, 0, 1) * route.level, 0.0001),
+          now + Math.max(0.01, duration)
+        )
+      },
+      pauseHook: () => {
+        for (const track of tracks) track.enabled = false
+      },
+      resumeHook: () => {
+        for (const track of tracks) track.enabled = true
+      }
+    }
+
+    this.trackRun(run)
+  }
+
   private async startAudio(cue: AudioCue, offsetInBuffer = 0, isResume = false): Promise<void> {
+    if (cue.sourceKind === 'microphone') {
+      await this.startMicrophone(cue)
+      return
+    }
     if (!cue.filePath) {
       this.onError(`El cue "${cue.name}" no tiene archivo asignado`)
       return
@@ -434,7 +538,8 @@ export class Player {
     this.loading.delete(cue.id)
     if (token.aborted) return
 
-    const { ctx, master } = outputBus(cue.deviceId)
+    const route = this.routeFor(cue)
+    const { ctx, master } = outputBus(route.deviceId)
     const start = clamp(cue.startTime + offsetInBuffer, 0, Math.max(0, buffer.duration - 0.01))
     const rawEnd =
       cue.endTime > start + 0.01 ? Math.min(cue.endTime, buffer.duration) : buffer.duration
@@ -447,7 +552,33 @@ export class Player {
     const gain = ctx.createGain()
     const panner = ctx.createStereoPanner()
     panner.pan.value = clamp(cue.pan, -1, 1)
-    gain.connect(panner)
+
+    // Cadena de ajuste: ganancia → paso alto → 3 bandas → panorama → bus.
+    const chain: AudioNode[] = [gain]
+    const eq = cue.eq ?? { low: 0, mid: 0, high: 0, highPass: 0 }
+    if (eq.highPass > 0) {
+      const highPass = ctx.createBiquadFilter()
+      highPass.type = 'highpass'
+      highPass.frequency.value = clamp(eq.highPass, 20, 400)
+      highPass.Q.value = 0.7
+      chain.push(highPass)
+    }
+    const bands: Array<[BiquadFilterType, number, number]> = [
+      ['lowshelf', 200, eq.low],
+      ['peaking', 1000, eq.mid],
+      ['highshelf', 4000, eq.high]
+    ]
+    for (const [type, frequency, db] of bands) {
+      if (Math.abs(db) < 0.05) continue
+      const filter = ctx.createBiquadFilter()
+      filter.type = type
+      filter.frequency.value = frequency
+      filter.gain.value = clamp(db, -12, 12)
+      if (type === 'peaking') filter.Q.value = 0.9
+      chain.push(filter)
+    }
+    chain.push(panner)
+    for (let index = 0; index < chain.length - 1; index += 1) chain[index].connect(chain[index + 1])
     panner.connect(master)
 
     const source = ctx.createBufferSource()
@@ -459,7 +590,7 @@ export class Player {
       source.loopEnd = rawEnd
     }
 
-    const volume = clamp(cue.volume, 0, 1)
+    const volume = clamp(cue.volume, 0, 1) * route.level
     const fadeIn = isResume ? 0 : Math.max(0, cue.fadeIn)
     const fadeOut = Math.max(0, cue.fadeOut)
     const param = gain.gain
@@ -557,15 +688,10 @@ export class Player {
     this.trackRun(run)
   }
 
-  private startVideo(cue: VideoCue): void {
-    const start = Math.max(0, cue.startTime ?? 0)
-    const segmentEnd = cue.endTime > start ? cue.endTime : cue.mediaDuration
-    const segment = cue.mediaKind === 'image' ? 5 : Math.max(0, segmentEnd - start)
-    const configured = cue.duration > 0 ? cue.duration : segment
-    const total = Math.max(0.05, configured > 0 ? configured : 5)
+  /** Cámara en directo en la ventana de salida (la captura la hace la propia salida). */
+  private startCamera(cue: VideoCue): void {
+    const total = cue.duration > 0 ? cue.duration : Number.POSITIVE_INFINITY
     const fadeOut = Math.max(0, cue.fadeOut)
-
-    // Cada cue es una capa independiente: al terminar una, las de abajo siguen visibles.
     const clear = (fade: number): void => {
       void api.outputEvent({ type: 'clear', cueId: cue.id, fadeOut: fade })
     }
@@ -576,16 +702,22 @@ export class Player {
         cueId: cue.id,
         displayId: cue.displayId ?? '',
         deviceId: cue.deviceId ?? '',
-        url: mediaUrl(cue.filePath),
-        kind: cue.mediaKind,
+        url: '',
+        kind: 'camera',
+        cameraDeviceId: cue.cameraDeviceId ?? '',
         volume: clamp(cue.volume, 0, 1),
-        loop: cue.loop,
-        startTime: start,
-        endTime: cue.endTime > start ? cue.endTime : 0,
+        loop: true,
+        startTime: 0,
+        endTime: 0,
         fadeIn: Math.max(0, cue.fadeIn),
         fadeOut,
         opacity: clamp(cue.opacity, 0, 1),
-        fit: cue.fit
+        fit: cue.fit,
+        scale: cue.scale > 0 ? cue.scale : 1,
+        offsetX: Number.isFinite(cue.offsetX) ? cue.offsetX : 0,
+        offsetY: Number.isFinite(cue.offsetY) ? cue.offsetY : 0,
+        rotation: Number.isFinite(cue.rotation) ? cue.rotation : 0,
+        testPattern: cue.testPattern === true
       }
     })
 
@@ -613,6 +745,87 @@ export class Player {
       },
       resumeHook: (remaining: number) => {
         void api.outputEvent({ type: 'resume', cueId: cue.id })
+        if (!Number.isFinite(remaining)) return
+        run.timers.push(window.setTimeout(() => this.finishRun(cue.id), remaining * 1000))
+      }
+    }
+
+    if (Number.isFinite(total)) {
+      run.timers.push(window.setTimeout(() => this.finishRun(cue.id), total * 1000))
+    }
+    this.trackRun(run)
+  }
+
+  private startVideo(cue: VideoCue): void {
+    if (cue.sourceKind === 'camera') {
+      this.startCamera(cue)
+      return
+    }
+    const start = Math.max(0, cue.startTime ?? 0)
+    const segmentEnd = cue.endTime > start ? cue.endTime : cue.mediaDuration
+    const segment = cue.mediaKind === 'image' ? 5 : Math.max(0, segmentEnd - start)
+    const configured = cue.duration > 0 ? cue.duration : segment
+    // En bucle el cue no termina solo: la capa se queda hasta que se pare.
+    const total = cue.loop
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0.05, configured > 0 ? configured : 5)
+    const fadeOut = Math.max(0, cue.fadeOut)
+
+    // Cada cue es una capa independiente: al terminar una, las de abajo siguen visibles.
+    const clear = (fade: number): void => {
+      void api.outputEvent({ type: 'clear', cueId: cue.id, fadeOut: fade })
+    }
+
+    void api.outputEvent({
+      type: 'show',
+      payload: {
+        cueId: cue.id,
+        displayId: cue.displayId ?? '',
+        deviceId: cue.deviceId ?? '',
+        url: mediaUrl(cue.filePath),
+        kind: cue.mediaKind,
+        cameraDeviceId: '',
+        volume: clamp(cue.volume, 0, 1),
+        loop: cue.loop,
+        startTime: start,
+        endTime: cue.endTime > start ? cue.endTime : 0,
+        fadeIn: Math.max(0, cue.fadeIn),
+        fadeOut,
+        opacity: clamp(cue.opacity, 0, 1),
+        fit: cue.fit,
+        scale: cue.scale > 0 ? cue.scale : 1,
+        offsetX: Number.isFinite(cue.offsetX) ? cue.offsetX : 0,
+        offsetY: Number.isFinite(cue.offsetY) ? cue.offsetY : 0,
+        rotation: Number.isFinite(cue.rotation) ? cue.rotation : 0,
+        testPattern: cue.testPattern === true
+      }
+    })
+
+    const run: Run = {
+      cue,
+      duration: total,
+      startPerf: performance.now(),
+      timers: [],
+      cancelled: false,
+      paused: false,
+      pauseStartPerf: 0,
+      accumulatedPauseMs: 0,
+      customPause: false,
+      resumeOffset: 0,
+      cancel: (fade) => {
+        run.cancelled = true
+        for (const timer of run.timers) window.clearTimeout(timer)
+        clear(fade > 0 ? fade : fadeOut)
+        this.runs.delete(cue.id)
+        this.notify()
+      },
+      fadeTo: () => undefined,
+      pauseHook: () => {
+        void api.outputEvent({ type: 'pause', cueId: cue.id })
+      },
+      resumeHook: (remaining: number) => {
+        void api.outputEvent({ type: 'resume', cueId: cue.id })
+        if (!Number.isFinite(remaining)) return
         run.timers.push(
           window.setTimeout(() => clear(fadeOut), Math.max(0, remaining - fadeOut) * 1000),
           window.setTimeout(() => this.finishRun(cue.id), remaining * 1000)
@@ -620,10 +833,12 @@ export class Player {
       }
     }
 
-    run.timers.push(
-      window.setTimeout(() => clear(fadeOut), Math.max(0, total - fadeOut) * 1000),
-      window.setTimeout(() => this.finishRun(cue.id), total * 1000)
-    )
+    if (Number.isFinite(total)) {
+      run.timers.push(
+        window.setTimeout(() => clear(fadeOut), Math.max(0, total - fadeOut) * 1000),
+        window.setTimeout(() => this.finishRun(cue.id), total * 1000)
+      )
+    }
 
     this.trackRun(run)
   }
@@ -708,6 +923,157 @@ export class Player {
       apply(1)
       this.finishRun(cue.id)
     }
+  }
+
+  /**
+   * Cue aleatorio: elige miembros del grupo y los dispara. Pensado para pilas de
+   * logos, donde cada GO muestra una pieza distinta.
+   */
+  private startRandom(cue: Cue & { type: 'random' }): void {
+    const byId = cueByIdMap(this.allCues())
+    const pool = (cue.members ?? [])
+      .map((id) => byId.get(id))
+      .filter((child): child is Cue => !!child && child.id !== cue.id && child.type !== 'group' && child.type !== 'random')
+
+    if (pool.length === 0) {
+      this.onError(`El cue "${cue.name}" no tiene cues entre los que elegir`)
+      this.startTimed(cue, 0.05)
+      return
+    }
+
+    const count = Math.max(1, Math.min(pool.length, Math.round(cue.count) || 1))
+    let candidates = pool
+    if (cue.avoidRepeat) {
+      const used = this.randomHistory.get(cue.id) ?? []
+      const remaining = pool.filter((child) => !used.includes(child.id))
+      if (remaining.length >= count) candidates = remaining
+      else this.randomHistory.set(cue.id, [])
+    }
+
+    const pool2 = [...candidates]
+    const picked: Cue[] = []
+    while (picked.length < count && pool2.length > 0) {
+      const index = Math.floor(Math.random() * pool2.length)
+      picked.push(pool2.splice(index, 1)[0])
+    }
+
+    if (cue.avoidRepeat) {
+      const used = new Set(this.randomHistory.get(cue.id) ?? [])
+      for (const child of picked) used.add(child.id)
+      this.randomHistory.set(cue.id, [...used])
+    }
+
+    const children: string[] = []
+    for (const child of picked) {
+      children.push(child.id)
+      if (!this.isActive(child.id)) this.startNow(child)
+    }
+
+    const run: Run = {
+      cue,
+      // Termina enseguida a propósito: así se puede volver a pulsar GO
+      // mientras el logo elegido sigue en pantalla.
+      duration: 0.05,
+      startPerf: performance.now(),
+      timers: [],
+      cancelled: false,
+      paused: false,
+      pauseStartPerf: 0,
+      accumulatedPauseMs: 0,
+      customPause: false,
+      resumeOffset: 0,
+      cancel: (fade) => {
+        run.cancelled = true
+        for (const timer of run.timers) window.clearTimeout(timer)
+        for (const id of children) this.stopCue(id, fade)
+        this.runs.delete(cue.id)
+        this.notify()
+      },
+      fadeTo: (gain, fadeDuration) => {
+        for (const id of children) this.fadeCue(id, gain, fadeDuration)
+      },
+      pauseHook: () => {
+        for (const id of children) {
+          if (this.runs.has(id)) this.pauseCue(id)
+        }
+      },
+      resumeHook: (remaining: number) => {
+        for (const id of children) {
+          if (this.runs.has(id) && this.isPaused(id)) this.resumeCue(id)
+        }
+        if (!Number.isFinite(remaining)) return
+        run.timers.push(
+          window.setTimeout(() => this.finishRun(cue.id), Math.max(0.02, remaining) * 1000)
+        )
+      }
+    }
+
+    run.timers.push(window.setTimeout(() => this.finishRun(cue.id), 50))
+    this.trackRun(run)
+  }
+
+  /** Línea de tiempo: dispara los cues anotados en su segundo correspondiente. */
+  private startTimeline(cue: Cue & { type: 'timeline' }): void {
+    const entries = [...(cue.entries ?? [])].sort((a, b) => a.at - b.at)
+    const last = entries.reduce((max, entry) => Math.max(max, entry.at), 0)
+    const end = cue.duration > 0 ? cue.duration : last + 0.05
+    const fired = new Set<number>()
+    const children: string[] = []
+
+    const run: Run = {
+      cue,
+      duration: Math.max(0.05, end),
+      startPerf: performance.now(),
+      timers: [],
+      cancelled: false,
+      paused: false,
+      pauseStartPerf: 0,
+      accumulatedPauseMs: 0,
+      customPause: false,
+      resumeOffset: 0,
+      cancel: (fade) => {
+        run.cancelled = true
+        window.clearInterval(timer)
+        for (const timer of run.timers) window.clearTimeout(timer)
+        for (const id of children) this.stopCue(id, fade)
+        this.runs.delete(cue.id)
+        this.notify()
+      },
+      fadeTo: (gain, duration) => {
+        for (const id of children) this.fadeCue(id, gain, duration)
+      },
+      pauseHook: () => {
+        for (const id of children) if (this.runs.has(id)) this.pauseCue(id)
+      },
+      resumeHook: () => {
+        for (const id of children) {
+          if (this.runs.has(id) && this.isPaused(id)) this.resumeCue(id)
+        }
+      }
+    }
+
+    const timer = window.setInterval(() => {
+      if (run.cancelled || !this.runs.has(cue.id)) {
+        window.clearInterval(timer)
+        return
+      }
+      if (run.paused) return
+      const elapsed = Math.max(0, (performance.now() - run.startPerf) / 1000)
+      entries.forEach((entry, index) => {
+        if (fired.has(index) || entry.at > elapsed) return
+        fired.add(index)
+        const child = this.getCue(entry.cueId)
+        if (!child || child.id === cue.id) return
+        children.push(child.id)
+        if (!this.isActive(child.id)) this.startNow(child)
+      })
+      if (elapsed >= run.duration) {
+        window.clearInterval(timer)
+        this.finishRun(cue.id)
+      }
+    }, 40)
+
+    this.trackRun(run)
   }
 
   private startGroup(cue: GroupCue): void {

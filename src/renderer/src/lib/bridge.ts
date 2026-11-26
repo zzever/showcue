@@ -28,7 +28,11 @@ const defaultSettings: AppSettings = {
   oscListenEnabled: false,
   oscListenPort: 9000,
   oscPrefix: '/showcue',
-  oscGma3: false
+  oscGma3: false,
+  artnetInEnabled: false,
+  artnetInPort: 6454,
+  speakerGroups: [],
+  timelinePriority: 'go'
 }
 
 function readWebState(): WebState {
@@ -100,6 +104,8 @@ const webApi: ShowCueApi = {
   listFixtures: async () => [],
   removeFixture: async () => [],
   dmxSend: async () => noop(),
+  setArtnetInput: async () => false,
+  onDmxIn: () => noop,
   notifyCue: async () => noop(),
   rdmDiscover: async () => [],
   rdmSetStartAddress: async () => null,

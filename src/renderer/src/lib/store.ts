@@ -1,6 +1,17 @@
 import { create } from 'zustand'
-import type { AppSettings, Cue, CueType, MediaFile, ShowFile } from '@shared/types'
+import type {
+  AppSettings,
+  Cue,
+  CueType,
+  MediaFile,
+  PatchFixture,
+  ShowFile,
+  TimelineEntry
+} from '@shared/types'
 import { createCue, createMediaCue, emptyShow, normalizeCue } from './cues'
+
+/** Valor de "lista activa" que muestra todas las sub-listas juntas. */
+export const ALL_LISTS = '*'
 
 export interface Toast {
   id: string
@@ -26,7 +37,13 @@ interface ShowStore {
   cues: Cue[]
   selectedId: string | null
   standbyId: string | null
+  /** Sub-lista activa para filtrar y para colocar los cues nuevos. */
+  activeList: string
   masterVolume: number
+  /** Patch de DMX del proyecto. */
+  patch: PatchFixture[]
+  /** Cues eliminados, para poder recuperarlos. */
+  trash: Cue[]
   path: string | null
   saveState: SaveState
   missing: Record<string, boolean>
@@ -35,12 +52,17 @@ interface ShowStore {
   outputOpen: boolean
   settingsOpen: boolean
   shortcutsOpen: boolean
+  dmxOpen: boolean
+  patchOpen: boolean
+  /** Grabación en curso de una línea de tiempo. */
+  recording: { startedAt: number; entries: TimelineEntry[] } | null
   historyPast: Snapshot[]
   historyFuture: Snapshot[]
 
   setTitle: (title: string) => void
   select: (id: string | null) => void
   setStandby: (id: string | null) => void
+  setActiveList: (list: string) => void
   setMasterVolume: (value: number) => void
   addCue: (type: CueType) => Cue
   addMedia: (files: MediaFile[]) => Cue[]
@@ -50,6 +72,11 @@ interface ShowStore {
   moveCue: (id: string, delta: number) => void
   loadShow: (show: ShowFile, path: string | null) => void
   newShow: () => void
+  setPatch: (patch: PatchFixture[]) => void
+  updatePatch: (id: string, patch: Partial<PatchFixture>) => void
+  removePatch: (id: string) => void
+  /** Recupera el último cue eliminado. */
+  restoreLast: () => Cue | null
   setPath: (path: string | null) => void
   setSaveState: (state: SaveState) => void
   setMissing: (missing: Record<string, boolean>) => void
@@ -57,6 +84,13 @@ interface ShowStore {
   setOutputOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean) => void
   setShortcutsOpen: (open: boolean) => void
+  setDmxOpen: (open: boolean) => void
+  setPatchOpen: (open: boolean) => void
+  startRecording: () => void
+  /** Anota un GO en la grabación si está activa. */
+  captureRecord: (cueId: string) => void
+  /** Cierra la grabación y crea el cue de línea de tiempo. */
+  stopRecording: () => Cue | null
   toast: (text: string, kind?: Toast['kind']) => void
   dismissToast: (id: string) => void
   /** Guarda el estado actual para poder deshacer. `tag` agrupa ediciones seguidas. */
@@ -79,7 +113,11 @@ const defaultSettings: AppSettings = {
   oscListenEnabled: false,
   oscListenPort: 9000,
   oscPrefix: '/showcue',
-  oscGma3: false
+  oscGma3: false,
+  artnetInEnabled: false,
+  artnetInPort: 6454,
+  speakerGroups: [],
+  timelinePriority: 'go'
 }
 
 const uid = (): string => Math.random().toString(36).slice(2) + Date.now().toString(36)
@@ -89,7 +127,10 @@ export const useShowStore = create<ShowStore>((set, get) => ({
   cues: [],
   selectedId: null,
   standbyId: null,
+  activeList: ALL_LISTS,
   masterVolume: 1,
+  patch: [],
+  trash: [],
   path: null,
   saveState: 'saved',
   missing: {},
@@ -98,6 +139,9 @@ export const useShowStore = create<ShowStore>((set, get) => ({
   outputOpen: false,
   settingsOpen: false,
   shortcutsOpen: false,
+  dmxOpen: false,
+  patchOpen: false,
+  recording: null,
   historyPast: [],
   historyFuture: [],
 
@@ -107,11 +151,14 @@ export const useShowStore = create<ShowStore>((set, get) => ({
 
   setStandby: (id) => set({ standbyId: id }),
 
+  setActiveList: (activeList) => set({ activeList }),
+
   setMasterVolume: (value) => set({ masterVolume: Math.min(1, Math.max(0, value)) }),
 
   addCue: (type) => {
     get().record(`add:${type}`)
-    const cue = createCue(type, get().cues, get().settings)
+    const list = get().activeList
+    const cue = createCue(type, get().cues, get().settings, list === ALL_LISTS ? '' : list)
     set((state) => ({ cues: [...state.cues, cue], selectedId: cue.id }))
     return cue
   },
@@ -122,7 +169,12 @@ export const useShowStore = create<ShowStore>((set, get) => ({
     set((state) => {
       let cues = state.cues
       for (const file of files) {
-        const cue = createMediaCue(file, cues, state.settings)
+        const cue = createMediaCue(
+          file,
+          cues,
+          state.settings,
+          state.activeList === ALL_LISTS ? '' : state.activeList
+        )
         cues = [...cues, cue]
         created.push(cue)
       }
@@ -145,11 +197,16 @@ export const useShowStore = create<ShowStore>((set, get) => ({
   removeCue: (id) => {
     get().record(`remove:${id}`)
     set((state) => {
+      const removed = state.cues.find((cue) => cue.id === id)
+      const trash = removed ? [...state.trash.slice(-49), removed] : state.trash
       const cues = state.cues
         .filter((cue) => cue.id !== id)
         .map((cue) => {
           if (cue.type === 'group') {
             return { ...cue, members: cue.members.filter((member) => member.cueId !== id) }
+          }
+          if (cue.type === 'random') {
+            return { ...cue, members: cue.members.filter((member) => member !== id) }
           }
           if (cue.type === 'stop' || cue.type === 'fade') {
             return { ...cue, targets: cue.targets.filter((target) => target !== id) }
@@ -160,11 +217,36 @@ export const useShowStore = create<ShowStore>((set, get) => ({
       const fallback = cues[Math.min(index, cues.length - 1)] ?? null
       return {
         cues,
+        trash,
         selectedId: state.selectedId === id ? (fallback?.id ?? null) : state.selectedId,
         standbyId: state.standbyId === id ? (fallback?.id ?? null) : state.standbyId
       }
     })
   },
+
+  restoreLast: () => {
+    const state = get()
+    const cue = state.trash[state.trash.length - 1]
+    if (!cue) return null
+    get().record(`restore:${cue.id}`)
+    const exists = state.cues.some((item) => item.id === cue.id)
+    set({
+      cues: exists ? state.cues : [...state.cues, cue],
+      trash: state.trash.slice(0, -1),
+      selectedId: cue.id,
+      standbyId: state.standbyId ?? cue.id
+    })
+    return cue
+  },
+
+  setPatch: (patch) => set({ patch }),
+
+  updatePatch: (id, delta) =>
+    set((state) => ({
+      patch: state.patch.map((item) => (item.id === id ? { ...item, ...delta } : item))
+    })),
+
+  removePatch: (id) => set((state) => ({ patch: state.patch.filter((item) => item.id !== id) })),
 
   duplicateCue: (id) => {
     get().record(`duplicate:${id}`)
@@ -201,9 +283,12 @@ export const useShowStore = create<ShowStore>((set, get) => ({
       title: show.title || 'Show sin título',
       cues: Array.isArray(show.cues) ? show.cues.map((cue) => normalizeCue(cue)) : [],
       masterVolume: typeof show.masterVolume === 'number' ? show.masterVolume : 1,
+      patch: Array.isArray(show.patch) ? show.patch : [],
+      trash: [],
       path,
       selectedId: show.cues?.[0]?.id ?? null,
       standbyId: show.cues?.[0]?.id ?? null,
+      activeList: ALL_LISTS,
       saveState: path ? 'saved' : 'draft',
       missing: {},
       historyPast: [],
@@ -216,9 +301,12 @@ export const useShowStore = create<ShowStore>((set, get) => ({
       title: show.title,
       cues: [],
       masterVolume: 1,
+      patch: [],
+      trash: [],
       path: null,
       selectedId: null,
       standbyId: null,
+      activeList: ALL_LISTS,
       saveState: 'draft',
       missing: {},
       historyPast: [],
@@ -233,6 +321,35 @@ export const useShowStore = create<ShowStore>((set, get) => ({
   setOutputOpen: (outputOpen) => set({ outputOpen }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
+  setDmxOpen: (dmxOpen) => set({ dmxOpen }),
+  setPatchOpen: (patchOpen) => set({ patchOpen }),
+
+  startRecording: () => set({ recording: { startedAt: Date.now(), entries: [] } }),
+
+  captureRecord: (cueId) => {
+    const recording = get().recording
+    if (!recording) return
+    const at = Math.round(((Date.now() - recording.startedAt) / 1000) * 100) / 100
+    set({ recording: { ...recording, entries: [...recording.entries, { at, cueId }] } })
+  },
+
+  stopRecording: () => {
+    const state = get()
+    const recording = state.recording
+    set({ recording: null })
+    if (!recording || recording.entries.length === 0) return null
+    const entries = [...recording.entries].sort((a, b) => a.at - b.at)
+    const duration = Math.round((entries[entries.length - 1].at + 1) * 100) / 100
+    const cue = createCue('timeline', state.cues, state.settings, state.activeList === ALL_LISTS ? '' : state.activeList)
+    const timeline = {
+      ...cue,
+      name: `Línea de tiempo (${entries.length} eventos)`,
+      entries,
+      duration
+    } as Cue
+    set({ cues: [...state.cues, timeline], selectedId: timeline.id })
+    return timeline
+  },
 
   toast: (text, kind = 'info') => {
     const id = Math.random().toString(36).slice(2)
@@ -317,6 +434,7 @@ export function showFromStore(): ShowFile {
     version: 1,
     title: state.title,
     masterVolume: state.masterVolume,
-    cues: state.cues
+    cues: state.cues,
+    patch: state.patch
   }
 }
